@@ -47,7 +47,14 @@ export class RevitSocketClient {
 
             this.ws.on('message', (data: WebSocket.Data) => {
                 try {
-                    const response = JSON.parse(data.toString()) as RevitResponse;
+                    const rawResponse = JSON.parse(data.toString());
+                    // Map PascalCase from C# to camelCase for internal use
+                    const response: RevitResponse = {
+                        success: rawResponse.Success,
+                        data: rawResponse.Data,
+                        error: rawResponse.Error,
+                        requestId: rawResponse.RequestId,
+                    };
                     console.error('[Socket] 收到回應:', response);
 
                     // 處理回應
@@ -99,10 +106,10 @@ export class RevitSocketClient {
         }
 
         const requestId = this.generateRequestId();
-        const command: RevitCommand = {
-            commandName,
-            parameters,
-            requestId,
+        const command = {
+            CommandName: commandName,
+            Parameters: parameters,
+            RequestId: requestId,
         };
 
         console.error(`[Socket] 發送命令: ${commandName}`, parameters);
