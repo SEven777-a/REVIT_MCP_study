@@ -81,6 +81,10 @@ namespace RevitMCP.Core
                         result = GetRoomInfo(parameters);
                         break;
                     
+                    case "get_rooms_by_level":
+                        result = GetRoomsByLevel(parameters);
+                        break;
+                    
                     default:
                         throw new NotImplementedException($"未實作的命令: {request.CommandName}");
                 }
@@ -705,6 +709,85 @@ namespace RevitMCP.Core
                     MaxX = Math.Round(bbox.Max.X * 304.8, 2),
                     MaxY = Math.Round(bbox.Max.Y * 304.8, 2)
                 } : null
+            };
+        }
+
+        /// <summary>
+        /// 取得樓層房間清單
+        /// </summary>
+        private object GetRoomsByLevel(JObject parameters)
+        {
+            Document doc = _uiApp.ActiveUIDocument.Document;
+            string levelName = parameters["level"]?.Value<string>();
+            bool includeUnnamed = parameters["includeUnnamed"]?.Value<bool>() ?? true;
+
+            if (string.IsNullOrEmpty(levelName))
+            {
+                throw new Exception("請指定樓層名稱");
+            }
+
+            // 取得指定樓層
+            Level targetLevel = new FilteredElementCollector(doc)
+                .OfClass(typeof(Level))
+                .Cast<Level>()
+                .FirstOrDefault(l => l.Name.Contains(levelName) || levelName.Contains(l.Name));
+
+            if (targetLevel == null)
+            {
+                throw new Exception($"找不到樓層: {levelName}");
+            }
+
+            // 取得該樓層的所有房間
+            var rooms = new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_Rooms)
+                .WhereElementIsNotElementType()
+                .Cast<Room>()
+                .Where(r => r.LevelId == targetLevel.Id)
+                .Where(r => r.Area > 0) // 排除面積為 0 的房間（未封閉）
+                .Select(r => 
+                {
+                    string roomName = r.get_Parameter(BuiltInParameter.ROOM_NAME)?.AsString();
+                    bool hasName = !string.IsNullOrEmpty(roomName) && roomName != "房間";
+                    
+                    // 取得房間中心點
+                    LocationPoint locPoint = r.Location as LocationPoint;
+                    XYZ center = locPoint?.Point ?? XYZ.Zero;
+                    
+                    // 取得面積（平方英尺 → 平方公尺）
+                    double areaM2 = r.Area * 0.092903;
+                    
+                    return new
+                    {
+                        ElementId = r.Id.IntegerValue,
+                        Name = roomName ?? "未命名",
+                        Number = r.Number,
+                        Area = Math.Round(areaM2, 2),
+                        HasName = hasName,
+                        CenterX = Math.Round(center.X * 304.8, 2),
+                        CenterY = Math.Round(center.Y * 304.8, 2)
+                    };
+                })
+                .Where(r => includeUnnamed || r.HasName)
+                .OrderBy(r => r.Number)
+                .ToList();
+
+            // 計算統計
+            double totalArea = rooms.Sum(r => r.Area);
+            int roomsWithName = rooms.Count(r => r.HasName);
+            int roomsWithoutName = rooms.Count(r => !r.HasName);
+
+            return new
+            {
+                Level = targetLevel.Name,
+                LevelId = targetLevel.Id.IntegerValue,
+                TotalRooms = rooms.Count,
+                TotalArea = Math.Round(totalArea, 2),
+                RoomsWithName = roomsWithName,
+                RoomsWithoutName = roomsWithoutName,
+                DataCompleteness = rooms.Count > 0 
+                    ? $"{Math.Round((double)roomsWithName / rooms.Count * 100, 1)}%" 
+                    : "N/A",
+                Rooms = rooms
             };
         }
 

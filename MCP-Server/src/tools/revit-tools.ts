@@ -364,6 +364,27 @@ export function registerRevitTools(): Tool[] {
                 },
             },
         },
+
+        // 17. 取得樓層房間清單
+        {
+            name: "get_rooms_by_level",
+            description: "取得指定樓層的所有房間清單，包含名稱、編號、面積、用途等資訊。可用於容積檢討。",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    level: {
+                        type: "string",
+                        description: "樓層名稱（如：1F、Level 1）",
+                    },
+                    includeUnnamed: {
+                        type: "boolean",
+                        description: "是否包含未命名的房間，預設 true",
+                        default: true,
+                    },
+                },
+                required: ["level"],
+            },
+        },
     ];
 }
 
