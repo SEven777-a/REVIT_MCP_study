@@ -163,6 +163,17 @@ namespace RevitMCP.Core
                 return new { Success = false, Message = "無有效的視圖 ID 可供排版。" };
             }
 
+            // ★ 修正 1：依視圖名稱末尾的剖面編號排序 (自然數字排序)
+            viewIds = viewIds
+                .OrderBy(id =>
+                {
+                    View v = doc.GetElement(id) as View;
+                    if (v == null) return int.MaxValue;
+                    var match = System.Text.RegularExpressions.Regex.Match(v.Name, @"(\d+)\s*$");
+                    return match.Success ? int.Parse(match.Groups[1].Value) : int.MaxValue;
+                })
+                .ToList();
+
             // 可用空間大小 (mm)
             double minXMm = _cachedLayoutBoundary.Min.X * 304.8;
             double maxXMm = _cachedLayoutBoundary.Max.X * 304.8;
@@ -170,6 +181,15 @@ namespace RevitMCP.Core
             double maxYMm = _cachedLayoutBoundary.Max.Y * 304.8;
             double boundaryWidthMm = maxXMm - minXMm;
             double boundaryHeightMm = maxYMm - minYMm;
+
+            // ★ 修正 2：標頭氣泡的額外空間補償 (固定值，以 mm 計算)
+            // 剖面符號氣泡 (Datum Annotation) 出現在視埠上方，佔用額外空間
+            // 視圖標題 (Viewport Title) 位於視埠下方
+            const double VIEWPORT_TITLE_HEIGHT_MM = 12.0; // 視埠標題高度
+            const double DATUM_BUBBLE_HEIGHT_MM = 8.0;    // 上方標頭氣泡高度
+            const double DATUM_BUBBLE_WIDTH_MM = 5.0;     // 左右氣泡寬度補償
+            const double H_MARGIN_MM = 15.0;              // 視圖間水平間距
+            const double V_MARGIN_MM = 10.0;              // 視圖間垂直間距
 
             // 排版演算法變數
             double currentX = minXMm;
@@ -212,13 +232,13 @@ namespace RevitMCP.Core
                     continue;
                 }
 
-                // 視圖在圖紙上的實際大小 (mm)
+                // ★ 修正 2：視圖在圖紙上的實際大小 (mm)，含標頭氣泡補償
                 double viewWidth = ((cropBox.Max.X - cropBox.Min.X) * 304.8) / view.Scale;
                 double viewHeight = ((cropBox.Max.Y - cropBox.Min.Y) * 304.8) / view.Scale;
 
-                // 加上間距 (Margin)
-                double totalWidth = viewWidth + 20.0; // 20mm 左右間距
-                double totalHeight = viewHeight + 35.0; // 35mm 上下間距 (含標題列)
+                // 總佔用空間 = 視圖本體 + 上方標頭氣泡 + 下方視埠標題 + 左右氣泡補償 + 視圖間距
+                double totalWidth = viewWidth + DATUM_BUBBLE_WIDTH_MM * 2 + H_MARGIN_MM;
+                double totalHeight = viewHeight + DATUM_BUBBLE_HEIGHT_MM + VIEWPORT_TITLE_HEIGHT_MM + V_MARGIN_MM;
 
                 // 1. 檢查單一視圖是否大於整個可用空間
                 if (totalWidth > boundaryWidthMm || totalHeight > boundaryHeightMm)
@@ -231,7 +251,7 @@ namespace RevitMCP.Core
                 if (currentX + totalWidth > maxXMm)
                 {
                     currentX = minXMm;
-                    currentY = currentY - currentRowMaxHeight - 15.0; // 15mm 行距
+                    currentY = currentY - currentRowMaxHeight - V_MARGIN_MM;
                     currentRowMaxHeight = 0;
                 }
 
@@ -245,9 +265,10 @@ namespace RevitMCP.Core
                     currentRowMaxHeight = 0;
                 }
 
-                // 4. 計算視埠中心點位置 (Revit 放置點為視埠中心)
-                double centerX = currentX + viewWidth / 2.0;
-                double centerY = currentY - viewHeight / 2.0;
+                // 4. 計算視埠中心點位置 (Revit 放置點為視埠「內容」中心，不含標題)
+                // 起點 currentY 為排版區上緣，需先扣除上方氣泡高度後，視圖本體中心往下半個 viewHeight
+                double centerX = currentX + DATUM_BUBBLE_WIDTH_MM + viewWidth / 2.0;
+                double centerY = currentY - DATUM_BUBBLE_HEIGHT_MM - viewHeight / 2.0;
 
                 sheetLayouts[sheetIndex].Add(new ViewportPlacement
                 {
@@ -260,7 +281,7 @@ namespace RevitMCP.Core
 
                 // 更新當前行的最大高度與 X 起點
                 currentRowMaxHeight = Math.Max(currentRowMaxHeight, totalHeight);
-                currentX = currentX + totalWidth + 15.0; // 15mm 視圖間距
+                currentX = currentX + totalWidth;
             }
 
             var createdSheets = new List<string>();
