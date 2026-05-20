@@ -182,14 +182,23 @@ namespace RevitMCP.Core
             double boundaryWidthMm = maxXMm - minXMm;
             double boundaryHeightMm = maxYMm - minYMm;
 
-            // ★ 修正 2：標頭氣泡的額外空間補償 (固定值，以 mm 計算)
-            // 剖面符號氣泡 (Datum Annotation) 出現在視埠上方，佔用額外空間
-            // 視圖標題 (Viewport Title) 位於視埠下方
-            const double VIEWPORT_TITLE_HEIGHT_MM = 12.0; // 視埠標題高度
-            const double DATUM_BUBBLE_HEIGHT_MM = 8.0;    // 上方標頭氣泡高度
-            const double DATUM_BUBBLE_WIDTH_MM = 5.0;     // 左右氣泡寬度補償
-            const double H_MARGIN_MM = 15.0;              // 視圖間水平間距
-            const double V_MARGIN_MM = 10.0;              // 視圖間垂直間距
+            // ★ 視埠尺寸補償常數 (可依實際 Revit 排版效果調整)
+            // Revit 中，視埠放置點為「模型內容框」的中心
+            // 下列補償值用於計算整個視埠（含標頭氣泡與標題列）的實際佔用空間
+
+            // 標頭氣泡 (Datum Annotations) 補償：
+            //   剖面視圖的樓層標記 (Level Tags) 在裁減框左右兩側各延伸，含氣泡圓圈 + 文字
+            //   剖面視圖的剖面頭標記 (Section Head) 在裁減框上方延伸
+            const double DATUM_BUBBLE_WIDTH_MM = 25.0;    // 樓層氣泡在左右各延伸的距離 (mm)
+            const double DATUM_BUBBLE_HEIGHT_MM = 15.0;   // 剖面頭氣泡在上方延伸的距離 (mm)
+
+            // 視埠標題列 (Viewport Title) 補償：
+            //   標題列包含視圖名稱文字，位於視埠內容框正下方
+            const double VIEWPORT_TITLE_HEIGHT_MM = 20.0; // 視埠標題列高度 (mm)
+
+            // 視圖間距 (Margin)
+            const double H_MARGIN_MM = 10.0;              // 水平視圖間距 (mm)
+            const double V_MARGIN_MM = 15.0;              // 垂直行間距 (mm)
 
             // ================================================
             // 第一階段：計算所有視圖的物理尺寸並分行規劃
