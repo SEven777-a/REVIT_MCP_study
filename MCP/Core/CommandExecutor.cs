@@ -25,6 +25,11 @@ namespace RevitMCP.Core
     {
         private readonly UIApplication _uiApp;
 
+        // === 自動出圖排版快取變數 (Static Cache) ===
+        private static BoundingBoxXYZ _cachedLayoutBoundary = null;
+        private static ElementId _cachedTitleBlockId = null;
+        private static ElementId _cachedSourceSheetId = null;
+
         public CommandExecutor(UIApplication uiApp)
         {
             _uiApp = uiApp ?? throw new ArgumentNullException(nameof(uiApp));
@@ -407,6 +412,14 @@ namespace RevitMCP.Core
                     // === 視圖與基準線調整模組 ===
                     case "adjust_section_datums":
                         result = AdjustSectionDatums(parameters);
+                        break;
+
+                    // === 自動出圖排版模組 ===
+                    case "set_layout_boundary":
+                        result = SetLayoutBoundary(parameters);
+                        break;
+                    case "auto_layout_sheets":
+                        result = AutoLayoutSheets(parameters);
                         break;
 
                     default:
