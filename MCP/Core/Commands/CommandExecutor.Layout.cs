@@ -110,14 +110,192 @@ namespace RevitMCP.Core
         }
 
         /// <summary>
+        /// 輔助結構：儲存視圖的排版結果
+        /// </summary>
+        private class ViewportPlacement
+        {
+            public ElementId ViewId { get; set; }
+            public string ViewName { get; set; }
+            public XYZ Center { get; set; }
+            public double WidthMm { get; set; }
+            public double HeightMm { get; set; }
+        }
+
+        /// <summary>
         /// 自動排版並生成圖紙放置視埠 (里程碑 2 實作)
         /// </summary>
         private object AutoLayoutSheets(JObject parameters)
         {
+            Document doc = _uiApp.ActiveUIDocument.Document;
+
+            if (_cachedLayoutBoundary == null || _cachedSourceSheetId == null)
+            {
+                return new { Success = false, Message = "尚未設定排版邊界。請先使用 set_layout_boundary 設定可用範圍。" };
+            }
+
+            // 讀取待排版視圖 ID 陣列
+            JArray viewIdsArray = parameters["viewIds"] as JArray;
+            if (viewIdsArray == null || viewIdsArray.Count == 0)
+            {
+                return new { Success = false, Message = "未提供有效的 viewIds 參數。" };
+            }
+
+            List<ElementId> viewIds = new List<ElementId>();
+            foreach (var token in viewIdsArray)
+            {
+                try
+                {
+                    IdType idVal = token.Value<IdType>();
+#if REVIT2025_OR_GREATER
+                    viewIds.Add(new ElementId(idVal));
+#else
+                    viewIds.Add(new ElementId((int)idVal));
+#endif
+                }
+                catch
+                {
+                    // 忽略無效 ID
+                }
+            }
+
+            if (viewIds.Count == 0)
+            {
+                return new { Success = false, Message = "無有效的視圖 ID 可供排版。" };
+            }
+
+            // 可用空間大小 (mm)
+            double minXMm = _cachedLayoutBoundary.Min.X * 304.8;
+            double maxXMm = _cachedLayoutBoundary.Max.X * 304.8;
+            double minYMm = _cachedLayoutBoundary.Min.Y * 304.8;
+            double maxYMm = _cachedLayoutBoundary.Max.Y * 304.8;
+            double boundaryWidthMm = maxXMm - minXMm;
+            double boundaryHeightMm = maxYMm - minYMm;
+
+            // 排版演算法變數
+            double currentX = minXMm;
+            double currentY = maxYMm;
+            double currentRowMaxHeight = 0;
+            
+            var sheetLayouts = new List<List<ViewportPlacement>>();
+            sheetLayouts.Add(new List<ViewportPlacement>());
+            
+            var errors = new List<string>();
+            int sheetIndex = 0;
+
+            foreach (var viewId in viewIds)
+            {
+                View view = doc.GetElement(viewId) as View;
+                if (view == null || view.IsTemplate)
+                {
+                    errors.Add($"ID {viewId} 不是有效的視圖或為視圖樣板。");
+                    continue;
+                }
+
+                // 檢查是否已放置於其他圖紙
+                if (!Viewport.CanAddViewToSheet(doc, _cachedSourceSheetId, view.Id))
+                {
+                    errors.Add($"視圖 '{view.Name}' (ID {view.Id}) 已放置於其他圖紙，無法重複放置。");
+                    continue;
+                }
+
+                // 讀取 CropBox 計算物理大小
+                if (!view.CropBoxActive)
+                {
+                    // 若未開啟，暫時以預設值或啟用它
+                    // 在此先透過 API 取得 CropBox，即使未啟用 Revit API 也會回傳預設 CropBox
+                }
+
+                BoundingBoxXYZ cropBox = view.CropBox;
+                if (cropBox == null)
+                {
+                    errors.Add($"無法取得視圖 '{view.Name}' 的 CropBox。");
+                    continue;
+                }
+
+                // 視圖在圖紙上的實際大小 (mm)
+                double viewWidth = ((cropBox.Max.X - cropBox.Min.X) * 304.8) / view.Scale;
+                double viewHeight = ((cropBox.Max.Y - cropBox.Min.Y) * 304.8) / view.Scale;
+
+                // 加上間距 (Margin)
+                double totalWidth = viewWidth + 20.0; // 20mm 左右間距
+                double totalHeight = viewHeight + 35.0; // 35mm 上下間距 (含標題列)
+
+                // 1. 檢查單一視圖是否大於整個可用空間
+                if (totalWidth > boundaryWidthMm || totalHeight > boundaryHeightMm)
+                {
+                    errors.Add($"視圖 '{view.Name}' 的尺寸 ({Math.Round(viewWidth)}x{Math.Round(viewHeight)} mm) 大於排版邊界限制 ({Math.Round(boundaryWidthMm)}x{Math.Round(boundaryHeightMm)} mm)，已跳過。");
+                    continue;
+                }
+
+                // 2. 檢查水平空間是否足夠，不夠則換行
+                if (currentX + totalWidth > maxXMm)
+                {
+                    currentX = minXMm;
+                    currentY = currentY - currentRowMaxHeight - 15.0; // 15mm 行距
+                    currentRowMaxHeight = 0;
+                }
+
+                // 3. 檢查垂直空間是否足夠，不夠則換頁 (開新圖紙)
+                if (currentY - totalHeight < minYMm)
+                {
+                    sheetIndex++;
+                    sheetLayouts.Add(new List<ViewportPlacement>());
+                    currentX = minXMm;
+                    currentY = maxYMm;
+                    currentRowMaxHeight = 0;
+                }
+
+                // 4. 計算視埠中心點位置 (Revit 放置點為視埠中心)
+                double centerX = currentX + viewWidth / 2.0;
+                double centerY = currentY - viewHeight / 2.0;
+
+                sheetLayouts[sheetIndex].Add(new ViewportPlacement
+                {
+                    ViewId = view.Id,
+                    ViewName = view.Name,
+                    Center = new XYZ(centerX / 304.8, centerY / 304.8, 0),
+                    WidthMm = Math.Round(viewWidth, 1),
+                    HeightMm = Math.Round(viewHeight, 1)
+                });
+
+                // 更新當前行的最大高度與 X 起點
+                currentRowMaxHeight = Math.Max(currentRowMaxHeight, totalHeight);
+                currentX = currentX + totalWidth + 15.0; // 15mm 視圖間距
+            }
+
+            // 里程碑 2：先回傳排版計畫供驗證
+            var pagesJson = new JArray();
+            for (int i = 0; i < sheetLayouts.Count; i++)
+            {
+                var page = sheetLayouts[i];
+                if (page.Count == 0) continue;
+
+                var pageJson = new JObject();
+                pageJson["PageIndex"] = i + 1;
+                
+                var viewportsJson = new JArray();
+                foreach (var vp in page)
+                {
+                    var vpJson = new JObject();
+                    vpJson["ViewId"] = vp.ViewId.GetIdValue();
+                    vpJson["ViewName"] = vp.ViewName;
+                    vpJson["WidthMm"] = vp.WidthMm;
+                    vpJson["HeightMm"] = vp.HeightMm;
+                    vpJson["CenterXFeet"] = vp.Center.X;
+                    vpJson["CenterYFeet"] = vp.Center.Y;
+                    viewportsJson.Add(vpJson);
+                }
+                pageJson["Viewports"] = viewportsJson;
+                pagesJson.Add(pageJson);
+            }
+
             return new
             {
-                Success = false,
-                Message = "自動排版放置邏輯將在里程碑 2 實作。"
+                Success = true,
+                Message = "排版演算法運算成功！(此為模擬結果，未實際修改 Revit 模型)",
+                TotalPagesNeeded = pagesJson.Count,
+                Errors = errors,
+                LayoutPlan = pagesJson
             };
         }
     }
