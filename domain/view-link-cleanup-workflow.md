@@ -15,7 +15,13 @@ metadata:
 
 # 視圖連結雜訊清理工作流程 (View Link Cleanup)
 
-本文件定義了在 Revit 視圖中，如何安全且符合 BIM 邏輯地批次關閉連結模型（Revit Links）的特定註解品類（如網格線、樓層線、參考平面等），以消除圖面雜訊。
+> [!WARNING]
+> **本工作流程已暫停開發（已歸檔）**
+> 
+> **不繼續開發的原因**：
+> 1. **複雜度與效益比考量**：在 Revit API 中，控制連結模型（`RevitLinkInstance`）的特定品類可見性（V/G overrides for links）邏輯極為繁瑣，且實務上容易與專案內建的「視圖樣板（View Template）」產生高度衝突。
+> 2. **優先級調整**：目前開發重點已轉移至更具直接效益的**剖面自動編排與命名**（[section-auto-numbering.md](file:///c:/Users/sn698/Desktop/REVIT_MCP_study/domain/section-auto-numbering.md)），以優先解決視圖管理的排版需求。
+> 3. 此工作流程與相關 API 規範暫作存檔參考，未來若有需要再行重啟。
 
 ---
 
