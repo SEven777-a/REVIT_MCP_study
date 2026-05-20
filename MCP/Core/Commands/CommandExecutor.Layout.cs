@@ -191,16 +191,18 @@ namespace RevitMCP.Core
             const double H_MARGIN_MM = 15.0;              // 視圖間水平間距
             const double V_MARGIN_MM = 10.0;              // 視圖間垂直間距
 
-            // 排版演算法變數
-            double currentX = minXMm;
-            double currentY = maxYMm;
-            double currentRowMaxHeight = 0;
-            
+            // ================================================
+            // 第一階段：計算所有視圖的物理尺寸並分行規劃
+            // ================================================
+
+            // 共用變數
+            var errors = new List<string>();
             var sheetLayouts = new List<List<ViewportPlacement>>();
             sheetLayouts.Add(new List<ViewportPlacement>());
-            
-            var errors = new List<string>();
             int sheetIndex = 0;
+
+            // 輔助結構：帶有計算好尺寸的視圖資訊
+            var viewInfos = new List<(ElementId ViewId, View View, double WidthMm, double HeightMm)>();
 
             foreach (var viewId in viewIds)
             {
@@ -211,18 +213,11 @@ namespace RevitMCP.Core
                     continue;
                 }
 
-                // 檢查是否已放置於其他圖紙
+                // 防呆：檢查是否已放置於其他圖紙
                 if (!Viewport.CanAddViewToSheet(doc, _cachedSourceSheetId, view.Id))
                 {
                     errors.Add($"視圖 '{view.Name}' (ID {view.Id}) 已放置於其他圖紙，無法重複放置。");
                     continue;
-                }
-
-                // 讀取 CropBox 計算物理大小
-                if (!view.CropBoxActive)
-                {
-                    // 若未開啟，暫時以預設值或啟用它
-                    // 在此先透過 API 取得 CropBox，即使未啟用 Revit API 也會回傳預設 CropBox
                 }
 
                 BoundingBoxXYZ cropBox = view.CropBox;
@@ -232,56 +227,101 @@ namespace RevitMCP.Core
                     continue;
                 }
 
-                // ★ 修正 2：視圖在圖紙上的實際大小 (mm)，含標頭氣泡補償
+                // 計算視圖本體物理尺寸 (mm)
                 double viewWidth = ((cropBox.Max.X - cropBox.Min.X) * 304.8) / view.Scale;
                 double viewHeight = ((cropBox.Max.Y - cropBox.Min.Y) * 304.8) / view.Scale;
 
-                // 總佔用空間 = 視圖本體 + 上方標頭氣泡 + 下方視埠標題 + 左右氣泡補償 + 視圖間距
-                double totalWidth = viewWidth + DATUM_BUBBLE_WIDTH_MM * 2 + H_MARGIN_MM;
-                double totalHeight = viewHeight + DATUM_BUBBLE_HEIGHT_MM + VIEWPORT_TITLE_HEIGHT_MM + V_MARGIN_MM;
-
-                // 1. 檢查單一視圖是否大於整個可用空間
-                if (totalWidth > boundaryWidthMm || totalHeight > boundaryHeightMm)
+                // 防呆：單一視圖就超過邊界寬度
+                double slotWidth = viewWidth + DATUM_BUBBLE_WIDTH_MM * 2;
+                if (slotWidth > boundaryWidthMm)
                 {
-                    errors.Add($"視圖 '{view.Name}' 的尺寸 ({Math.Round(viewWidth)}x{Math.Round(viewHeight)} mm) 大於排版邊界限制 ({Math.Round(boundaryWidthMm)}x{Math.Round(boundaryHeightMm)} mm)，已跳過。");
+                    errors.Add($"視圖 '{view.Name}' 的寬度 ({Math.Round(viewWidth)} mm) 超過排版邊界限制 ({Math.Round(boundaryWidthMm)} mm)，已跳過。");
                     continue;
                 }
 
-                // 2. 檢查水平空間是否足夠，不夠則換行
-                if (currentX + totalWidth > maxXMm)
+                viewInfos.Add((viewId, view, viewWidth, viewHeight));
+            }
+
+            // ★ 新演算法：以行為單位預算（Row Pre-calculation）
+            // 步驟：累加接下來視圖的 X 寬度，塞滿一行後換行
+            // 行高取該行內所有視圖中的最大高度
+            var rows = new List<List<(ElementId ViewId, View View, double WidthMm, double HeightMm)>>();
+            var currentRow = new List<(ElementId ViewId, View View, double WidthMm, double HeightMm)>();
+            double currentRowWidthSum = 0;
+
+            foreach (var info in viewInfos)
+            {
+                // 視圖在行內佔用的格位寬度（含左右氣泡補償）
+                double slotWidth = info.WidthMm + DATUM_BUBBLE_WIDTH_MM * 2 + H_MARGIN_MM;
+
+                // 若加入後超過邊界，先把目前行存起來，開新行
+                if (currentRow.Count > 0 && currentRowWidthSum + slotWidth > boundaryWidthMm)
                 {
-                    currentX = minXMm;
-                    currentY = currentY - currentRowMaxHeight - V_MARGIN_MM;
-                    currentRowMaxHeight = 0;
+                    rows.Add(currentRow);
+                    currentRow = new List<(ElementId, View, double, double)>();
+                    currentRowWidthSum = 0;
                 }
 
-                // 3. 檢查垂直空間是否足夠，不夠則換頁 (開新圖紙)
-                if (currentY - totalHeight < minYMm)
+                currentRow.Add(info);
+                currentRowWidthSum += slotWidth;
+            }
+            // 把最後一行存入
+            if (currentRow.Count > 0)
+                rows.Add(currentRow);
+
+            // ================================================
+            // 第二階段：依行順序分配圖紙並計算放置座標
+            // ================================================
+            double layoutCurrentY = maxYMm;
+
+            foreach (var row in rows)
+            {
+                // 此行的最大視圖高度 = 行高基準
+                double rowMaxViewHeight = row.Max(r => r.HeightMm);
+                // 此行佔用的總垂直空間 (視圖本體 + 上方氣泡 + 下方標題 + 行距)
+                double rowTotalHeight = rowMaxViewHeight + DATUM_BUBBLE_HEIGHT_MM + VIEWPORT_TITLE_HEIGHT_MM + V_MARGIN_MM;
+
+                // 防呆：此行高度超過整個排版邊界（不可能放入任何一頁）
+                if (rowTotalHeight > boundaryHeightMm)
+                {
+                    foreach (var item in row)
+                        errors.Add($"視圖 '{item.View.Name}' 所在行的高度 ({Math.Round(rowMaxViewHeight)} mm) 超過排版邊界，已跳過。");
+                    continue;
+                }
+
+                // 若當前 Y 不夠放此行，換頁（建立新圖紙）
+                if (layoutCurrentY - rowTotalHeight < minYMm)
                 {
                     sheetIndex++;
                     sheetLayouts.Add(new List<ViewportPlacement>());
-                    currentX = minXMm;
-                    currentY = maxYMm;
-                    currentRowMaxHeight = 0;
+                    layoutCurrentY = maxYMm;
                 }
 
-                // 4. 計算視埠中心點位置 (Revit 放置點為視埠「內容」中心，不含標題)
-                // 起點 currentY 為排版區上緣，需先扣除上方氣泡高度後，視圖本體中心往下半個 viewHeight
-                double centerX = currentX + DATUM_BUBBLE_WIDTH_MM + viewWidth / 2.0;
-                double centerY = currentY - DATUM_BUBBLE_HEIGHT_MM - viewHeight / 2.0;
-
-                sheetLayouts[sheetIndex].Add(new ViewportPlacement
+                // 由左至右依序放置此行的視圖
+                double layoutCurrentX = minXMm;
+                foreach (var item in row)
                 {
-                    ViewId = view.Id,
-                    ViewName = view.Name,
-                    Center = new XYZ(centerX / 304.8, centerY / 304.8, 0),
-                    WidthMm = Math.Round(viewWidth, 1),
-                    HeightMm = Math.Round(viewHeight, 1)
-                });
+                    // 視埠放置中心點：
+                    //   X = 目前 X 起點 + 左側氣泡補償 + 視圖寬/2
+                    //   Y = 目前行頂部 - 上方氣泡高度 - 視圖高/2
+                    double centerX = layoutCurrentX + DATUM_BUBBLE_WIDTH_MM + item.WidthMm / 2.0;
+                    double centerY = layoutCurrentY - DATUM_BUBBLE_HEIGHT_MM - item.HeightMm / 2.0;
 
-                // 更新當前行的最大高度與 X 起點
-                currentRowMaxHeight = Math.Max(currentRowMaxHeight, totalHeight);
-                currentX = currentX + totalWidth;
+                    sheetLayouts[sheetIndex].Add(new ViewportPlacement
+                    {
+                        ViewId = item.ViewId,
+                        ViewName = item.View.Name,
+                        Center = new XYZ(centerX / 304.8, centerY / 304.8, 0),
+                        WidthMm = Math.Round(item.WidthMm, 1),
+                        HeightMm = Math.Round(item.HeightMm, 1)
+                    });
+
+                    // 移動到下一個視圖的 X 起點
+                    layoutCurrentX += item.WidthMm + DATUM_BUBBLE_WIDTH_MM * 2 + H_MARGIN_MM;
+                }
+
+                // 此行放置完成，Y 往下移動一行高度
+                layoutCurrentY -= rowTotalHeight;
             }
 
             var createdSheets = new List<string>();
