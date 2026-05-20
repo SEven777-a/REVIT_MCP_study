@@ -263,40 +263,99 @@ namespace RevitMCP.Core
                 currentX = currentX + totalWidth + 15.0; // 15mm 視圖間距
             }
 
-            // 里程碑 2：先回傳排版計畫供驗證
-            var pagesJson = new JArray();
-            for (int i = 0; i < sheetLayouts.Count; i++)
-            {
-                var page = sheetLayouts[i];
-                if (page.Count == 0) continue;
+            var createdSheets = new List<string>();
+            var placedViewports = new List<string>();
 
-                var pageJson = new JObject();
-                pageJson["PageIndex"] = i + 1;
-                
-                var viewportsJson = new JArray();
-                foreach (var vp in page)
+            // 執行實體 Revit 修改 (里程碑 3 實作)
+            using (Transaction trans = new Transaction(doc, "自動排版出圖"))
+            {
+                trans.Start();
+
+                try
                 {
-                    var vpJson = new JObject();
-                    vpJson["ViewId"] = vp.ViewId.GetIdValue();
-                    vpJson["ViewName"] = vp.ViewName;
-                    vpJson["WidthMm"] = vp.WidthMm;
-                    vpJson["HeightMm"] = vp.HeightMm;
-                    vpJson["CenterXFeet"] = vp.Center.X;
-                    vpJson["CenterYFeet"] = vp.Center.Y;
-                    viewportsJson.Add(vpJson);
+                    // 取得起始圖紙資訊
+                    ViewSheet sourceSheet = doc.GetElement(_cachedSourceSheetId) as ViewSheet;
+                    string currentSheetNumber = sourceSheet?.SheetNumber ?? "A-101";
+                    string currentSheetName = sourceSheet?.Name ?? "剖面圖紙";
+
+                    for (int i = 0; i < sheetLayouts.Count; i++)
+                    {
+                        var page = sheetLayouts[i];
+                        if (page.Count == 0) continue;
+
+                        ElementId targetSheetId = null;
+
+                        if (i == 0)
+                        {
+                            // 第一頁直接使用目前設定範圍的來源圖紙
+                            targetSheetId = _cachedSourceSheetId;
+                            createdSheets.Add($"{currentSheetName} ({currentSheetNumber}) [現有圖紙]");
+                        }
+                        else
+                        {
+                            // 後續頁數建立新圖紙
+                            currentSheetNumber = IncrementString(currentSheetNumber);
+                            
+                            // 避免編號衝突
+                            int safetyCounter = 0;
+                            while (IsSheetNumberExists(doc, currentSheetNumber) && safetyCounter < 100)
+                            {
+                                currentSheetNumber = IncrementString(currentSheetNumber);
+                                safetyCounter++;
+                            }
+
+                            ViewSheet newSheet = ViewSheet.Create(doc, _cachedTitleBlockId);
+                            newSheet.SheetNumber = currentSheetNumber;
+                            newSheet.Name = $"{currentSheetName} - {i + 1}";
+                            
+                            targetSheetId = newSheet.Id;
+                            createdSheets.Add($"{newSheet.Name} ({newSheet.SheetNumber}) [新增圖紙]");
+                        }
+
+                        // 放置視圖
+                        foreach (var vp in page)
+                        {
+                            if (Viewport.CanAddViewToSheet(doc, targetSheetId, vp.ViewId))
+                            {
+                                Viewport newVp = Viewport.Create(doc, targetSheetId, vp.ViewId, vp.Center);
+                                placedViewports.Add($"視圖 '{vp.ViewName}' ➜ 圖紙 ({currentSheetNumber})");
+                            }
+                            else
+                            {
+                                errors.Add($"無法將視圖 '{vp.ViewName}' (ID {vp.ViewId}) 放置到圖紙 ({currentSheetNumber}) 上。可能是因為視圖已被放置到其他圖紙。");
+                            }
+                        }
+                    }
+
+                    trans.Commit();
                 }
-                pageJson["Viewports"] = viewportsJson;
-                pagesJson.Add(pageJson);
+                catch (Exception ex)
+                {
+                    trans.RollBack();
+                    return new { Success = false, Message = $"自動排版過程中發生錯誤已復原，錯誤原因：{ex.Message}" };
+                }
             }
 
             return new
             {
                 Success = true,
-                Message = "排版演算法運算成功！(此為模擬結果，未實際修改 Revit 模型)",
-                TotalPagesNeeded = pagesJson.Count,
-                Errors = errors,
-                LayoutPlan = pagesJson
+                Message = "自動排版出圖成功！",
+                TotalPagesCreated = createdSheets.Count,
+                CreatedSheets = createdSheets,
+                PlacedViewports = placedViewports,
+                Errors = errors
             };
+        }
+
+        /// <summary>
+        /// 輔助方法：檢查圖紙編號是否已存在於專案中
+        /// </summary>
+        private bool IsSheetNumberExists(Document doc, string sheetNumber)
+        {
+            return new FilteredElementCollector(doc)
+                .OfClass(typeof(ViewSheet))
+                .Cast<ViewSheet>()
+                .Any(s => s.SheetNumber.Equals(sheetNumber, StringComparison.OrdinalIgnoreCase));
         }
     }
 }
