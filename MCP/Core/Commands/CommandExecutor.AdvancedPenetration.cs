@@ -66,8 +66,9 @@ namespace RevitMCP.Core
                         continue; 
                     }
 
+                    string[] diamParams = parameters["diameterParamNames"]?.ToObject<string[]>();
                     XYZ sleeveCenter = (sleeveBBox.Min + sleeveBBox.Max) * 0.5;
-                    double sleeveD = GetSleeveDiameter(sleeve, sleeveBBox);
+                    double sleeveD = GetSleeveDiameter(sleeve, sleeveBBox, diamParams);
                     string sleeveLevel = GetReferenceLevelName(sleeve);
 
                     foreach (var li in linkInstances)
@@ -147,36 +148,32 @@ namespace RevitMCP.Core
             }
         }
 
-        private double GetSleeveDiameter(Element sleeve, BoundingBoxXYZ bb) {
-            // 優先從類型參數與名稱解析
+        private double GetSleeveDiameter(Element sleeve, BoundingBoxXYZ bb, string[] paramNames = null) {
+            if (paramNames == null || paramNames.Length == 0) {
+                paramNames = new string[] { "開孔直徑", "直徑", "管徑", "Diameter", "Size" };
+            }
+
+            // 1. 使用雙層參數讀取器 (Instance -> Type)
+            double? paramVal = GetParameterValueWithFallback(sleeve, paramNames);
+            if (paramVal.HasValue) return paramVal.Value;
+
+            // 2. 嘗試從類型名稱解析 (例如 "圓形開口 200mm") 作為備用
             Element type = sleeve.Document.GetElement(sleeve.GetTypeId());
             if (type != null) {
-                // 嘗試從名稱解析 (例如 "圓形開口 200mm")
                 var match = System.Text.RegularExpressions.Regex.Match(type.Name, @"(\d+)");
                 if (match.Success) {
                     double nameVal = double.Parse(match.Groups[1].Value) / 304.8; // mm to feet
-                    // 尋找數值接近 nameVal 的參數
                     foreach (Parameter tp in type.Parameters) {
                         if (tp.StorageType == StorageType.Double && Math.Abs(tp.AsDouble() - nameVal) < 0.01) return tp.AsDouble();
                     }
                 }
             }
 
-            Parameter p = sleeve.LookupParameter("開孔直徑") ?? sleeve.LookupParameter("直徑") ?? sleeve.LookupParameter("管徑") ?? sleeve.LookupParameter("Diameter");
-            
-            // 如果實體參數沒找到，去類型參數找
-            if (p == null || !p.HasValue) {
-                Element typeElem = sleeve.Document.GetElement(sleeve.GetTypeId());
-                p = typeElem?.LookupParameter("開孔直徑") ?? typeElem?.LookupParameter("直徑") ?? typeElem?.LookupParameter("管徑");
+            // 3. 最終備案：使用幾何包絡盒寬度
+            if (bb != null) {
+                return Math.Max(bb.Max.X - bb.Min.X, bb.Max.Y - bb.Min.Y);
             }
-
-            if (p != null && p.HasValue && p.StorageType == StorageType.Double) {
-                double val = p.AsDouble();
-                if (val > 0.001) return val; // 只有大於 0 才回傳
-            }
-            
-            // 最終備案：使用幾何包絡盒寬度
-            return Math.Max(bb.Max.X - bb.Min.X, bb.Max.Y - bb.Min.Y);
+            return 0.1 / 0.3048; // 預設 10cm
         }
 
         private double GetBeamDepth(Element beam) {

@@ -170,6 +170,10 @@ namespace RevitMCP.Core
                         result = CreateDimension(parameters);
                         break;
 
+                    case "clear_previous_annotations":
+                        result = ClearPreviousAnnotations(parameters);
+                        break;
+
                     case "create_corridor_dimension":
                         result = CreateCorridorDimension(parameters);
                         break;
@@ -1842,11 +1846,18 @@ namespace RevitMCP.Core
                     end.Subtract(perpDir.Multiply(lineLength / 2)), 
                     end.Add(perpDir.Multiply(lineLength / 2))));
 
+                // 標記為穿梁輔助線段
+                dc1.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
+                dc2.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
+
                 refArray.Append(dc1.GeometryCurve.Reference);
                 refArray.Append(dc2.GeometryCurve.Reference);
 
                 // 建立尺寸標註
                 Dimension dim = doc.Create.NewDimension(view, dimLine, refArray);
+                
+                // 標記為穿梁輔助尺寸標註
+                dim.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
 
                 // 注意：保留詳圖線作為標註參考點（如需刪除請手動處理）
 
@@ -1863,6 +1874,72 @@ namespace RevitMCP.Core
                     ViewName = view.Name,
                     Message = $"成功建立尺寸標註: {Math.Round(dimValue, 0)} mm"
                 };
+            }
+        }
+
+        private object ClearPreviousAnnotations(JObject parameters)
+        {
+            Document doc = _uiApp.ActiveUIDocument.Document;
+            View activeView = doc.ActiveView;
+
+            using (Transaction trans = new Transaction(doc, "清除舊有穿梁標註"))
+            {
+                trans.Start();
+
+                // 1. 蒐集當前視圖中的所有 Dimension
+                var dimensions = new FilteredElementCollector(doc, activeView.Id)
+                    .OfClass(typeof(Dimension))
+                    .Cast<Dimension>()
+                    .ToList();
+
+                // 2. 蒐集當前視圖中的所有 DetailCurve
+                var detailCurves = new FilteredElementCollector(doc, activeView.Id)
+                    .OfClass(typeof(CurveElement))
+                    .Cast<CurveElement>()
+                    .Where(c => c is DetailArc || c is DetailLine || c.GetType().Name.Contains("Detail"))
+                    .ToList();
+
+                // 3. 蒐集當前視圖中的所有 TextNote
+                var textNotes = new FilteredElementCollector(doc, activeView.Id)
+                    .OfClass(typeof(TextNote))
+                    .Cast<TextNote>()
+                    .ToList();
+
+                List<ElementId> toDelete = new List<ElementId>();
+
+                // 檢查 Dimension
+                foreach (var d in dimensions) {
+                    Parameter p = d.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
+                    if (p != null && p.HasValue && p.AsString() == "BeamPenetration_Helper") {
+                        toDelete.Add(d.Id);
+                    }
+                }
+
+                // 檢查 DetailCurve
+                foreach (var dc in detailCurves) {
+                    Parameter p = dc.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
+                    if (p != null && p.HasValue && p.AsString() == "BeamPenetration_Helper") {
+                        toDelete.Add(dc.Id);
+                    }
+                }
+
+                // 檢查 TextNote
+                foreach (var tn in textNotes) {
+                    Parameter p = tn.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS);
+                    if (p != null && p.HasValue && p.AsString() == "BeamPenetration_Helper") {
+                        toDelete.Add(tn.Id);
+                    } else if (tn.Text.StartsWith("● PASS") || tn.Text.StartsWith("● FAIL:")) {
+                        toDelete.Add(tn.Id);
+                    }
+                }
+
+                int deletedCount = toDelete.Count;
+                if (deletedCount > 0) {
+                    doc.Delete(toDelete);
+                }
+
+                trans.Commit();
+                return new { Success = true, DeletedCount = deletedCount };
             }
         }
 

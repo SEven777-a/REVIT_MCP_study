@@ -89,6 +89,11 @@ namespace RevitMCP.Core
                 IdType beamId = parameters["beamId"]?.Value<IdType>() ?? 0;
                 IdType linkId = parameters["linkInstanceId"]?.Value<IdType>() ?? 0;
 
+                // 接收外部傳遞的動態參數名稱 (若無則由方法內部給定預設值)
+                string[] diamParams = parameters["diameterParamNames"]?.ToObject<string[]>();
+                string[] lenParams = parameters["lengthParamNames"]?.ToObject<string[]>();
+                string[] widthParams = parameters["widthParamNames"]?.ToObject<string[]>();
+
                 Document mainDoc = _uiApp.ActiveUIDocument.Document;
                 Document doc = mainDoc;
                 Transform tr = Transform.Identity;
@@ -109,7 +114,7 @@ namespace RevitMCP.Core
 
                 string beamLevel = GetReferenceLevelName(beam);
                 double beamDepth = GetBeamDepth(beam);
-                double beamWidth = GetBeamWidth(beam);
+                double beamWidth = GetBeamWidth(beam, widthParams);
 
                 BoundingBoxXYZ beamBox = beam.get_BoundingBox(null);
                 if (beamBox == null) throw new Exception($"無法取得梁 (ID: {beamId}) 的 BoundingBox");
@@ -122,15 +127,26 @@ namespace RevitMCP.Core
                     new XYZ(Math.Max(worldMin.X, worldMax.X), Math.Max(worldMin.Y, worldMax.Y), Math.Max(worldMin.Z, worldMax.Z))
                 );
 
-                // 在主模型的當前視圖中，尋找與梁相交的套管
-                View activeView = mainDoc.ActiveView;
-                var sleeves = new FilteredElementCollector(mainDoc, activeView.Id)
-                    .WhereElementIsNotElementType()
-                    .WherePasses(new BoundingBoxIntersectsFilter(beamOutline))
-                    .WherePasses(new ElementMulticategoryFilter(new List<BuiltInCategory> { 
-                        BuiltInCategory.OST_PipeAccessory, 
-                        BuiltInCategory.OST_GenericModel 
-                    })).ToList();
+                List<Element> sleeves = new List<Element>();
+                IdType[] targetSleeveIds = parameters["sleeveIds"]?.ToObject<IdType[]>();
+
+                if (targetSleeveIds != null && targetSleeveIds.Length > 0) {
+                    // 如果外部已經明確指定了套管清單 (精確名單模式)，直接讀取實體
+                    foreach (IdType sId in targetSleeveIds) {
+                        Element sl = mainDoc.GetElement(new ElementId(sId));
+                        if (sl != null) sleeves.Add(sl);
+                    }
+                } else {
+                    // 退回舊有邏輯：在主模型的當前視圖中，尋找與梁相交的套管
+                    View activeView = mainDoc.ActiveView;
+                    sleeves = new FilteredElementCollector(mainDoc, activeView.Id)
+                        .WhereElementIsNotElementType()
+                        .WherePasses(new BoundingBoxIntersectsFilter(beamOutline))
+                        .WherePasses(new ElementMulticategoryFilter(new List<BuiltInCategory> { 
+                            BuiltInCategory.OST_PipeAccessory, 
+                            BuiltInCategory.OST_GenericModel 
+                        })).ToList();
+                }
 
                 var checkResults = new List<object>();
 
@@ -150,7 +166,7 @@ namespace RevitMCP.Core
                     if (!isSleeve) continue;
 
                     XYZ sleeveCenter = (sleeveBBox.Min + sleeveBBox.Max) * 0.5;
-                    double sleeveD = GetSleeveDiameter(sleeve, sleeveBBox);
+                    double sleeveD = GetSleeveDiameter(sleeve, sleeveBBox, diamParams);
                     string sleeveLevel = GetReferenceLevelName(sleeve);
 
                     double distToStart = -1;
@@ -174,6 +190,14 @@ namespace RevitMCP.Core
                     double beamTopZ = worldMax.Z;
                     double beamBottomZ = worldMin.Z;
 
+                    XYZ worldP0 = XYZ.Zero;
+                    XYZ worldP1 = XYZ.Zero;
+                    if (beamLoc != null)
+                    {
+                        worldP0 = tr.OfPoint(beamLoc.Curve.GetEndPoint(0));
+                        worldP1 = tr.OfPoint(beamLoc.Curve.GetEndPoint(1));
+                    }
+
                     checkResults.Add(new {
                         SleeveId = sleeve.Id.GetIdValue(),
                         SleeveLevel = sleeveLevel,
@@ -185,13 +209,19 @@ namespace RevitMCP.Core
                         BeamDepth = beamDepth * 304.8, // mm
                         BeamWidth = beamWidth * 304.8, // mm
                         SleeveDiameter = sleeveD * 304.8, // mm
-                        SleeveLength = GetSleeveLength(sleeve) * 304.8, // mm
+                        SleeveLength = GetSleeveLength(sleeve, lenParams) * 304.8, // mm
                         DistanceToStart = distToStart * 304.8,
                         DistanceToEnd = distToEnd * 304.8,
                         MinDistance = minDist * 304.8,
                         SleeveZ = sleeveCenter.Z * 304.8,
                         BeamTopZ = beamTopZ * 304.8,
-                        BeamBottomZ = beamBottomZ * 304.8
+                        BeamBottomZ = beamBottomZ * 304.8,
+                        BeamStartX = worldP0.X * 304.8,
+                        BeamStartY = worldP0.Y * 304.8,
+                        BeamEndX = worldP1.X * 304.8,
+                        BeamEndY = worldP1.Y * 304.8,
+                        SleeveX = sleeveCenter.X * 304.8,
+                        SleeveY = sleeveCenter.Y * 304.8
                     });
                 }
 
@@ -204,10 +234,90 @@ namespace RevitMCP.Core
             }
         }
 
+        private bool IsPointNearColumn(Document doc, XYZ point)
+        {
+            // 建立一個約 30cm (1 英尺) 大小的 Bounding Box 包圍該端點
+            double size = 1.0; 
+            Outline outline = new Outline(
+                new XYZ(point.X - size / 2, point.Y - size / 2, point.Z - size / 2),
+                new XYZ(point.X + size / 2, point.Y + size / 2, point.Z + size / 2)
+            );
+
+            // 1. 搜尋主模型中的結構柱
+            var columns = new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_StructuralColumns)
+                .WherePasses(new BoundingBoxIntersectsFilter(outline))
+                .WhereElementIsNotElementType()
+                .ToList();
+
+            if (columns.Count > 0) return true;
+
+            // 2. 搜尋連結模型中的結構柱
+            var linkInstances = new FilteredElementCollector(doc)
+                .OfClass(typeof(RevitLinkInstance))
+                .Cast<RevitLinkInstance>()
+                .ToList();
+
+            foreach (var li in linkInstances)
+            {
+                Document linkDoc = li.GetLinkDocument();
+                if (linkDoc == null) continue;
+
+                Transform tr = li.GetTotalTransform();
+                XYZ localPoint = tr.Inverse.OfPoint(point);
+                Outline localOutline = new Outline(
+                    new XYZ(localPoint.X - size / 2, localPoint.Y - size / 2, localPoint.Z - size / 2),
+                    new XYZ(localPoint.X + size / 2, localPoint.Y + size / 2, localPoint.Z + size / 2)
+                );
+
+                var linkColumns = new FilteredElementCollector(linkDoc)
+                    .OfCategory(BuiltInCategory.OST_StructuralColumns)
+                    .WherePasses(new BoundingBoxIntersectsFilter(localOutline))
+                    .WhereElementIsNotElementType()
+                    .ToList();
+
+                if (linkColumns.Count > 0) return true;
+            }
+
+            return false;
+        }
+
         private string DetermineBeamUsage(FamilyInstance beam)
         {
+            // 先使用內建參數判斷，若是 Joist 則直接判定為 Minor
             var usage = beam.StructuralUsage;
-            return usage == StructuralInstanceUsage.Joist ? "Minor" : "Major";
+            if (usage == StructuralInstanceUsage.Joist) return "Minor";
+
+            try
+            {
+                LocationCurve beamLoc = beam.Location as LocationCurve;
+                if (beamLoc != null)
+                {
+                    Curve curve = beamLoc.Curve;
+                    XYZ p0 = curve.GetEndPoint(0);
+                    XYZ p1 = curve.GetEndPoint(1);
+
+                    // 檢查梁的兩個端點是否與結構柱相交/相連
+                    bool p0HasCol = IsPointNearColumn(beam.Document, p0);
+                    bool p1HasCol = IsPointNearColumn(beam.Document, p1);
+
+                    // 任一端點與柱相連為大梁，均未與柱相連則判定為小梁
+                    if (p0HasCol || p1HasCol)
+                    {
+                        return "Major";
+                    }
+                    else
+                    {
+                        return "Minor";
+                    }
+                }
+            }
+            catch
+            {
+                // 發生異常時退回原有的內建參數判定
+            }
+
+            return "Major";
         }
 
         private bool CheckIsIntersectsWithWall(Document doc, Element sleeve)
@@ -272,24 +382,72 @@ namespace RevitMCP.Core
                     }
 
                     // 獲取預設的文字類型 ID (Revit 2017+ 需要有效的類型)
-                    ElementId defaultTextTypeId = doc.GetDefaultElementTypeId(ElementTypeClass.TextNoteType);
+                    ElementId defaultTextTypeId = doc.GetDefaultElementTypeId(ElementTypeGroup.TextNoteType);
                     if (defaultTextTypeId == ElementId.InvalidElementId) {
                         defaultTextTypeId = new FilteredElementCollector(doc).OfClass(typeof(TextNoteType)).FirstElementId();
                     }
-                    TextNote.Create(doc, doc.ActiveView.Id, pos, isOk ? "● PASS" : "● FAIL: " + msg, defaultTextTypeId);
+                    TextNote tn = TextNote.Create(doc, doc.ActiveView.Id, pos, isOk ? "● PASS" : "● FAIL: " + msg, defaultTextTypeId);
+                    tn.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
                 }
                 trans.Commit();
             }
             return new { Success = true };
         }
 
-        private double GetBeamWidth(Element beam) {
-            Parameter p = beam.LookupParameter("b") ?? beam.LookupParameter("梁寬") ?? beam.LookupParameter("Width");
-            return (p != null && p.HasValue) ? p.AsDouble() : 0.4 / 0.3048;
+        /// <summary>
+        /// 泛用的雙層參數讀取器 (Instance -> Type)
+        /// </summary>
+        private double? GetParameterValueWithFallback(Element elem, string[] paramNames)
+        {
+            if (elem == null || paramNames == null || paramNames.Length == 0) return null;
+
+            // 1. 搜尋實體參數 (Instance)
+            foreach (string paramName in paramNames)
+            {
+                Parameter p = elem.LookupParameter(paramName);
+                if (p != null && p.HasValue && p.StorageType == StorageType.Double)
+                {
+                    double val = p.AsDouble();
+                    if (val > 0.001) return val;
+                }
+            }
+
+            // 2. 搜尋類型參數 (Type)
+            ElementId typeId = elem.GetTypeId();
+            if (typeId != ElementId.InvalidElementId)
+            {
+                Element typeElem = elem.Document.GetElement(typeId);
+                if (typeElem != null)
+                {
+                    foreach (string paramName in paramNames)
+                    {
+                        Parameter p = typeElem.LookupParameter(paramName);
+                        if (p != null && p.HasValue && p.StorageType == StorageType.Double)
+                        {
+                            double val = p.AsDouble();
+                            if (val > 0.001) return val;
+                        }
+                    }
+                }
+            }
+
+            return null;
         }
-        private double GetSleeveLength(Element sleeve) {
-            Parameter p = sleeve.LookupParameter("長度") ?? sleeve.LookupParameter("Length");
-            return (p != null && p.HasValue) ? p.AsDouble() : 0.6 / 0.3048;
+
+        private double GetBeamWidth(Element beam, string[] paramNames = null) {
+            if (paramNames == null || paramNames.Length == 0) {
+                paramNames = new string[] { "樑寬", "b", "梁寬", "Width" };
+            }
+            double? val = GetParameterValueWithFallback(beam, paramNames);
+            return val ?? (0.4 / 0.3048); // 預設 40cm
+        }
+
+        private double GetSleeveLength(Element sleeve, string[] paramNames = null) {
+            if (paramNames == null || paramNames.Length == 0) {
+                paramNames = new string[] { "開口長度", "長度", "Length" };
+            }
+            double? val = GetParameterValueWithFallback(sleeve, paramNames);
+            return val ?? (0.6 / 0.3048); // 預設 60cm
         }
         private string GetReferenceLevelName(Element elem) {
             // 嘗試多種可能的樓層參數名稱
