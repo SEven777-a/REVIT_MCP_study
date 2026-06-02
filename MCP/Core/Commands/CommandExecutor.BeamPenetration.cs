@@ -46,6 +46,10 @@ namespace RevitMCP.Core
                 BoundingBoxXYZ sleeveBBox = sleeve.get_BoundingBox(null);
                 if (sleeveBBox == null) continue;
 
+                // 物理幾何碰撞第一層篩選：優先排除穿牆與穿板套管
+                if (CheckIsIntersectsWithWall(mainDoc, sleeve)) continue;
+                if (CheckIsIntersectsWithFloor(mainDoc, sleeve)) continue;
+
                 foreach (var li in linkInstances)
                 {
                     Document linkDoc = li.GetLinkDocument();
@@ -155,6 +159,10 @@ namespace RevitMCP.Core
                     BoundingBoxXYZ sleeveBBox = sleeve.get_BoundingBox(null);
                     if (sleeveBBox == null) continue;
 
+                    // 物理幾何碰撞第一層篩選：優先排除穿牆與穿板套管，以避免族群一致時的誤判
+                    if (CheckIsIntersectsWithWall(mainDoc, sleeve)) continue;
+                    if (CheckIsIntersectsWithFloor(mainDoc, sleeve)) continue;
+
                     string comments = sleeve.LookupParameter("備註")?.AsString() ?? "";
                     string familyName = (sleeve as FamilyInstance)?.Symbol?.FamilyName ?? "";
                     string typeName = sleeve.Name;
@@ -210,6 +218,8 @@ namespace RevitMCP.Core
                         BeamWidth = beamWidth * 304.8, // mm
                         SleeveDiameter = sleeveD * 304.8, // mm
                         SleeveLength = GetSleeveLength(sleeve, lenParams) * 304.8, // mm
+                        IsExcluded = Math.Abs(GetSleeveLength(sleeve, lenParams) * 304.8 - beamWidth * 304.8) > 10.0,
+                        ExclusionReason = Math.Abs(GetSleeveLength(sleeve, lenParams) * 304.8 - beamWidth * 304.8) > 10.0 ? "套管長度與梁寬不匹配" : "",
                         DistanceToStart = distToStart * 304.8,
                         DistanceToEnd = distToEnd * 304.8,
                         MinDistance = minDist * 304.8,
@@ -236,8 +246,8 @@ namespace RevitMCP.Core
 
         private bool IsPointNearColumn(Document doc, XYZ point)
         {
-            // 建立一個約 30cm (1 英尺) 大小的 Bounding Box 包圍該端點
-            double size = 1.0; 
+            // 建立一個約 15cm (0.5 英尺) 大小的 Bounding Box 包圍該端點，作為拓撲未連接時的備用幾何防線
+            double size = 0.5; 
             Outline outline = new Outline(
                 new XYZ(point.X - size / 2, point.Y - size / 2, point.Z - size / 2),
                 new XYZ(point.X + size / 2, point.Y + size / 2, point.Z + size / 2)
@@ -282,9 +292,39 @@ namespace RevitMCP.Core
             return false;
         }
 
+        private bool IsBeamEndConnectedToColumn(FamilyInstance beam, int end)
+        {
+            try
+            {
+                LocationCurve beamLoc = beam.Location as LocationCurve;
+                if (beamLoc == null) return false;
+
+                Document doc = beam.Document;
+                var connectedIds = beamLoc.get_ElementsAtJoin(end);
+                if (connectedIds == null) return false;
+
+                foreach (ElementId id in connectedIds)
+                {
+                    Element elem = doc.GetElement(id);
+                    if (elem == null) continue;
+
+                    // 檢查相連元素的品類是否為結構柱
+                    if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralColumns)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                // 忽略異常，退回幾何判定
+            }
+            return false;
+        }
+
         private string DetermineBeamUsage(FamilyInstance beam)
         {
-            // 先使用內建參數判斷，若是 Joist 則直接判定為 Minor
+            // 1. 先使用內建參數判斷，若是 Joist 則直接判定為 Minor
             var usage = beam.StructuralUsage;
             if (usage == StructuralInstanceUsage.Joist) return "Minor";
 
@@ -293,16 +333,19 @@ namespace RevitMCP.Core
                 LocationCurve beamLoc = beam.Location as LocationCurve;
                 if (beamLoc != null)
                 {
-                    Curve curve = beamLoc.Curve;
-                    XYZ p0 = curve.GetEndPoint(0);
-                    XYZ p1 = curve.GetEndPoint(1);
+                    // 2. 優先使用方案 A：拓撲相連檢查 (get_ElementsAtJoin)
+                    bool p0Connected = IsBeamEndConnectedToColumn(beam, 0);
+                    bool p1Connected = IsBeamEndConnectedToColumn(beam, 1);
+                    if (p0Connected || p1Connected) return "Major";
 
-                    // 檢查梁的兩個端點是否與結構柱相交/相連
-                    bool p0HasCol = IsPointNearColumn(beam.Document, p0);
-                    bool p1HasCol = IsPointNearColumn(beam.Document, p1);
+                    // 3. 備用防禦方案 B：幾何微距碰撞檢查 (15cm 穩健公差範圍)
+                    XYZ p0 = beamLoc.Curve.GetEndPoint(0);
+                    XYZ p1 = beamLoc.Curve.GetEndPoint(1);
 
-                    // 任一端點與柱相連為大梁，均未與柱相連則判定為小梁
-                    if (p0HasCol || p1HasCol)
+                    bool p0NearCol = IsPointNearColumn(beam.Document, p0);
+                    bool p1NearCol = IsPointNearColumn(beam.Document, p1);
+
+                    if (p0NearCol || p1NearCol)
                     {
                         return "Major";
                     }
@@ -314,25 +357,107 @@ namespace RevitMCP.Core
             }
             catch
             {
-                // 發生異常時退回原有的內建參數判定
+                // 發生異常時退回 Major
             }
 
             return "Major";
         }
 
-        private bool CheckIsIntersectsWithWall(Document doc, Element sleeve)
+        private bool CheckIsIntersectsWithWall(Document mainDoc, Element sleeve)
         {
             BoundingBoxXYZ bbox = sleeve.get_BoundingBox(null);
             if (bbox == null) return false;
             
             Outline outline = new Outline(bbox.Min, bbox.Max);
-            var walls = new FilteredElementCollector(doc, doc.ActiveView.Id)
+            
+            // 1. 檢查主模型中的牆
+            var walls = new FilteredElementCollector(mainDoc)
                 .OfCategory(BuiltInCategory.OST_Walls)
                 .WherePasses(new BoundingBoxIntersectsFilter(outline))
                 .WhereElementIsNotElementType()
                 .ToList();
                 
-            return walls.Count > 0;
+            if (walls.Count > 0) return true;
+            
+            // 2. 檢查連結模型中的牆
+            var linkInstances = new FilteredElementCollector(mainDoc)
+                .OfClass(typeof(RevitLinkInstance))
+                .Cast<RevitLinkInstance>()
+                .ToList();
+                
+            foreach (var li in linkInstances)
+            {
+                Document linkDoc = li.GetLinkDocument();
+                if (linkDoc == null) continue;
+                
+                Transform tr = li.GetTotalTransform();
+                
+                // 將套管的 BoundingBox 轉換至連結模型坐標系
+                XYZ localMin = tr.Inverse.OfPoint(bbox.Min);
+                XYZ localMax = tr.Inverse.OfPoint(bbox.Max);
+                Outline localOutline = new Outline(
+                    new XYZ(Math.Min(localMin.X, localMax.X), Math.Min(localMin.Y, localMax.Y), Math.Min(localMin.Z, localMax.Z)),
+                    new XYZ(Math.Max(localMin.X, localMax.X), Math.Max(localMin.Y, localMax.Y), Math.Max(localMin.Z, localMax.Z))
+                );
+                
+                var linkWalls = new FilteredElementCollector(linkDoc)
+                    .OfCategory(BuiltInCategory.OST_Walls)
+                    .WherePasses(new BoundingBoxIntersectsFilter(localOutline))
+                    .WhereElementIsNotElementType()
+                    .ToList();
+                    
+                if (linkWalls.Count > 0) return true;
+            }
+            
+            return false;
+        }
+
+        private bool CheckIsIntersectsWithFloor(Document mainDoc, Element sleeve)
+        {
+            BoundingBoxXYZ bbox = sleeve.get_BoundingBox(null);
+            if (bbox == null) return false;
+            
+            Outline outline = new Outline(bbox.Min, bbox.Max);
+            
+            // 1. 檢查主模型中的樓板
+            var floors = new FilteredElementCollector(mainDoc)
+                .OfCategory(BuiltInCategory.OST_Floors)
+                .WherePasses(new BoundingBoxIntersectsFilter(outline))
+                .WhereElementIsNotElementType()
+                .ToList();
+                
+            if (floors.Count > 0) return true;
+            
+            // 2. 檢查連結模型中的樓板
+            var linkInstances = new FilteredElementCollector(mainDoc)
+                .OfClass(typeof(RevitLinkInstance))
+                .Cast<RevitLinkInstance>()
+                .ToList();
+                
+            foreach (var li in linkInstances)
+            {
+                Document linkDoc = li.GetLinkDocument();
+                if (linkDoc == null) continue;
+                
+                Transform tr = li.GetTotalTransform();
+                
+                XYZ localMin = tr.Inverse.OfPoint(bbox.Min);
+                XYZ localMax = tr.Inverse.OfPoint(bbox.Max);
+                Outline localOutline = new Outline(
+                    new XYZ(Math.Min(localMin.X, localMax.X), Math.Min(localMin.Y, localMax.Y), Math.Min(localMin.Z, localMax.Z)),
+                    new XYZ(Math.Max(localMin.X, localMax.X), Math.Max(localMin.Y, localMax.Y), Math.Max(localMin.Z, localMax.Z))
+                );
+                
+                var linkFloors = new FilteredElementCollector(linkDoc)
+                    .OfCategory(BuiltInCategory.OST_Floors)
+                    .WherePasses(new BoundingBoxIntersectsFilter(localOutline))
+                    .WhereElementIsNotElementType()
+                    .ToList();
+                    
+                if (linkFloors.Count > 0) return true;
+            }
+            
+            return false;
         }
 
         private object GetSrcBeamMapping(JObject parameters) { return new { Success = true }; }
@@ -386,8 +511,12 @@ namespace RevitMCP.Core
                     if (defaultTextTypeId == ElementId.InvalidElementId) {
                         defaultTextTypeId = new FilteredElementCollector(doc).OfClass(typeof(TextNoteType)).FirstElementId();
                     }
-                    TextNote tn = TextNote.Create(doc, doc.ActiveView.Id, pos, isOk ? "● PASS" : "● FAIL: " + msg, defaultTextTypeId);
+                    TextNote tn = TextNote.Create(doc, doc.ActiveView.Id, pos, isOk ? "● PASS" : "● FAIL", defaultTextTypeId);
                     tn.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
+                    
+                    OverrideGraphicSettings textOgs = new OverrideGraphicSettings();
+                    textOgs.SetProjectionLineColor(color);
+                    doc.ActiveView.SetElementOverrides(tn.Id, textOgs);
                 }
                 trans.Commit();
             }

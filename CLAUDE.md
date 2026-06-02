@@ -29,7 +29,7 @@ A 5th "embedded" option bypasses the MCP Server entirely — a WPF chat window i
 | 行為指引 | CLAUDE.md | GEMINI.md → CLAUDE.md | .github/copilot-instructions.md |
 | Skills | `.claude/skills/SKILL.md` | `.gemini/skills/SKILL.md`（[官方文件](https://geminicli.com/docs/cli/skills/)） | instructions 引導 |
 | Domain 文件 | 共用 `domain/` | 共用 `domain/` | 共用 `domain/` |
-| MCP Tools | 共用 89 個工具 | 共用 89 個工具 | 共用 89 個工具 |
+| MCP Tools | 共用 93 個工具 | 共用 93 個工具 | 共用 93 個工具 |
 | Event Log | 共用 `log/` | 共用 `log/` | 共用 `log/` |
 
 SKILL.md 格式遵循 [Agent Skills 開放標準](https://agentskills.io)（YAML frontmatter + Markdown body），Claude Code 與 Gemini CLI 皆原生支援。
@@ -121,13 +121,13 @@ npm run watch    # tsc --watch (development)
 | File | Role |
 |------|------|
 | `MCP/Application.cs` | Revit IExternalApplication entry point, creates ribbon panel |
-| `MCP/Core/CommandExecutor.cs` | Central command dispatcher (89+ commands), largest file |
+| `MCP/Core/CommandExecutor.cs` | Central command dispatcher (93+ commands), largest file |
 | `MCP/Core/SocketService.cs` | HttpListener-based WebSocket server in Revit |
 | `MCP/Core/RevitCompatibility.cs` | Cross-version compatibility layer (ElementId int→long for 2025+) |
 | `MCP/Core/ExternalEventManager.cs` | Ensures commands execute on Revit UI thread |
 | `MCP-Server/src/index.ts` | MCP Server entry (StdioServerTransport) |
 | `MCP-Server/src/socket.ts` | RevitSocketClient — WebSocket client to Revit |
-| `MCP-Server/src/tools/` | Tool definitions (89 tools, 分 16 個模組) |
+| `MCP-Server/src/tools/` | Tool definitions (93 tools, 分 17 個模組) |
 | `scripts/setup.ps1` | One-click setup for new users (prereqs, build, deploy, AI config) |
 
 ## Code Conventions
@@ -155,7 +155,7 @@ npm run watch    # tsc --watch (development)
 3. **查閱法規知識** → 讀取 Domain 文件（`domain/*.md`）
 
 ### 為什麼
-MCP Server 已封裝 89 個 tools，處理了格式轉換、錯誤處理、重連機制。自寫腳本會：
+MCP Server 已封裝 93 個 tools，處理了格式轉換、錯誤處理、重連機制。自寫腳本會：
 - 繞過既有的錯誤處理與格式驗證
 - 產生 process 掛起（如自動重連導致無法退出）
 - 與 Revit API 的 PascalCase 欄位不一致而靜默失敗
@@ -345,7 +345,7 @@ All AI clients connect to the MCP Server via the same config format. Replace `{a
 | Port 8964 被 System (PID: 4) 佔用 | Revit 異常關閉後 HTTP.sys 孤兒 Request Queue | 執行 `scripts\release-port.ps1`，或手動：`net stop http /y && net start http` |
 | Commands not responding in Revit | Revit UI thread issue | Ensure `ExternalEventManager` is used; check `%AppData%\RevitMCP\Logs\` |
 
-## Domain Knowledge & Workflow Files（40 個）
+## Domain Knowledge & Workflow Files（45 個）
 
 The `domain/` directory contains BIM compliance workflows that AI must consult before executing related tasks:
 
@@ -391,6 +391,11 @@ The `domain/` directory contains BIM compliance workflows that AI must consult b
 | 輕隔間, partition, 隔間牆算量, takeoff, 數量統計 | `domain/revit-partition-takeoff.md` |
 | 粉刷, 油漆, finish legend, 圖例, FilledRegion, 飾面圖例 | `domain/finish-legend-creation.md` |
 | 門表, 窗表, door schedule, window schedule, 圖例表, seed Legend | `domain/door-window-legend-workflow.md` |
+| 穿梁基礎, beam penetration, 穿梁套管, 套管穿梁 | `domain/beam-penetration-base.md` |
+| RC 穿梁, 混凝土梁穿孔, 穿梁禁開區, RC beam penetration | `domain/beam-penetration-rc.md` |
+| SC 穿梁, 鋼梁穿孔, SC beam penetration | `domain/beam-penetration-sc.md` |
+| SRC 穿梁, 鋼骨混凝土梁穿孔, SRC beam penetration | `domain/beam-penetration-src.md` |
+| 套管識別, sleeve classification, 穿板套管, 穿牆套管 | `domain/sleeve-classification-protocol.md` |
 
 ## Deployment Rules (DO NOT VIOLATE)
 

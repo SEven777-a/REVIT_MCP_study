@@ -43,6 +43,10 @@ namespace RevitMCP.Core
                     BoundingBoxXYZ sleeveBBox = sleeve.get_BoundingBox(null);
                     if (sleeveBBox == null) continue;
 
+                    // 幾何碰撞第一層篩選：優先排除穿牆與穿板套管
+                    if (CheckIsIntersectsWithWall(mainDoc, sleeve)) continue;
+                    if (CheckIsIntersectsWithFloor(mainDoc, sleeve)) continue;
+
                     string comments = sleeve.LookupParameter("備註")?.AsString() ?? "";
                     string familyName = (sleeve as FamilyInstance)?.Symbol?.FamilyName ?? "";
                     string typeName = sleeve.Name;
@@ -92,7 +96,9 @@ namespace RevitMCP.Core
 
                         foreach (var b in linkBeams)
                         {
+                            FamilyInstance beamInstance = b as FamilyInstance;
                             double beamDepth = GetBeamDepth(b);
+                            double beamWidth = GetBeamWidth(b);
                             string beamLevel = GetReferenceLevelName(b);
                             
                             double distToStart = -1;
@@ -123,8 +129,14 @@ namespace RevitMCP.Core
                                 BeamId = b.Id.GetIdValue(),
                                 BeamName = b.Name,
                                 BeamLevel = beamLevel,
+                                BeamUsage = beamInstance != null ? DetermineBeamUsage(beamInstance) : "Major",
+                                IsNearWall = CheckIsIntersectsWithWall(mainDoc, sleeve),
                                 BeamDepth = beamDepth * 304.8, // convert to mm
+                                BeamWidth = beamWidth * 304.8, // convert to mm
                                 SleeveDiameter = sleeveD * 304.8, // convert to mm
+                                SleeveLength = GetSleeveLength(sleeve) * 304.8, // convert to mm
+                                IsExcluded = Math.Abs(GetSleeveLength(sleeve) * 304.8 - beamWidth * 304.8) > 10.0,
+                                ExclusionReason = Math.Abs(GetSleeveLength(sleeve) * 304.8 - beamWidth * 304.8) > 10.0 ? "套管長度與梁寬不匹配" : "",
                                 DistanceToStart = distToStart * 304.8,
                                 DistanceToEnd = distToEnd * 304.8,
                                 MinDistance = minDist * 304.8,
