@@ -697,43 +697,14 @@ namespace RevitMCP.Core
                 XYZ perpDir = new XYZ(-beamDir.Y, beamDir.X, 0).Normalize();
 
                 XYZ sleeveToBeam = (sleeveCenter - projPoint).Normalize();
-                XYZ offsetDir = perpDir;
+                double offsetVal = 500.0;
                 if (sleeveToBeam.DotProduct(perpDir) < 0)
                 {
-                    offsetDir = perpDir.Negate();
+                    offsetVal = -500.0;
                 }
 
-                // 偏移距離：500mm
-                double offsetFeet = 500.0 / 304.8;
-                // 詳圖線延伸長度：650mm (從梁內 150mm 到梁外 500mm)
-                double startOffsetFeet = -150.0 / 304.8;
-                double endOffsetFeet = 500.0 / 304.8;
-
-                XYZ pt1_start = targetEnd.Add(offsetDir.Multiply(startOffsetFeet));
-                XYZ pt1_end = targetEnd.Add(offsetDir.Multiply(endOffsetFeet));
-
-                XYZ pt2_start = projPoint.Add(offsetDir.Multiply(startOffsetFeet));
-                XYZ pt2_end = projPoint.Add(offsetDir.Multiply(endOffsetFeet));
-
-                // 尺寸線在偏移 400mm 處
-                double dimOffsetFeet = 400.0 / 304.8;
-                XYZ dimStart = targetEnd.Add(offsetDir.Multiply(dimOffsetFeet));
-                XYZ dimEnd = projPoint.Add(offsetDir.Multiply(dimOffsetFeet));
-
-                Line dimLine = Line.CreateBound(dimStart, dimEnd);
-
-                DetailCurve dc1 = doc.Create.NewDetailCurve(view, Line.CreateBound(pt1_start, pt1_end));
-                DetailCurve dc2 = doc.Create.NewDetailCurve(view, Line.CreateBound(pt2_start, pt2_end));
-
-                ReferenceArray refArray = new ReferenceArray();
-                refArray.Append(dc1.GeometryCurve.Reference);
-                refArray.Append(dc2.GeometryCurve.Reference);
-
-                Dimension dim = doc.Create.NewDimension(view, dimLine, refArray);
-                
-                dc1.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
-                dc2.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
-                dim.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
+                // 呼叫現有工具庫的標註建立核心方法，不重複製作輪子
+                CreateDimensionInternal(doc, view, targetEnd.X * 304.8, targetEnd.Y * 304.8, projPoint.X * 304.8, projPoint.Y * 304.8, offsetVal);
             }
             catch (Exception)
             {
