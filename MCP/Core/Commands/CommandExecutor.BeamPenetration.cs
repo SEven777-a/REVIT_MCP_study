@@ -253,50 +253,49 @@ namespace RevitMCP.Core
                         distToStartFace = distToStart;
                         distToEndFace = distToEnd;
 
-                        // 偵測起點(0)相連結構並計算 Face
+                        XYZ beamDirTemp = (bc.GetEndPoint(1) - bc.GetEndPoint(0)).Normalize();
+                        XYZ worldP0Temp = tr.OfPoint(bc.GetEndPoint(0));
+                        XYZ worldP1Temp = tr.OfPoint(bc.GetEndPoint(1));
+                        XYZ worldBeamDirTemp = tr.OfVector(beamDirTemp).Normalize();
+
+                        double offsetStart = GetCollisionWidthAtPoint(mainDoc, worldP0Temp, worldBeamDirTemp, beam.Id);
+                        double offsetEnd = GetCollisionWidthAtPoint(mainDoc, worldP1Temp, worldBeamDirTemp, beam.Id);
+
+                        distToStartFace = distToStart - offsetStart / 2.0;
+                        distToEndFace = distToEnd - offsetEnd / 2.0;
+
+                        // 偵測起點(0)相連結構取得大梁深度
                         var conn0 = beamLoc.get_ElementsAtJoin(0);
                         if (conn0 != null)
                         {
-                            foreach (Element elem in conn0)
+                            foreach (ElementId id in conn0)
                             {
+                                Element elem = doc.GetElement(id);
                                 if (elem == null || elem.Id == beam.Id) continue;
                                 if (elem.Category != null)
                                 {
                                     int catId = elem.Category.Id.IntegerValue;
                                     if (catId == (int)BuiltInCategory.OST_StructuralFraming) {
                                         connDepthStart = GetBeamDepth(elem) * 304.8;
-                                        distToStartFace = distToStart - GetBeamWidth(elem) / 2.0;
-                                        break;
-                                    } else if (catId == (int)BuiltInCategory.OST_StructuralColumns) {
-                                        distToStartFace = distToStart - GetColumnWidth(elem) / 2.0;
-                                        break;
-                                    } else if (catId == (int)BuiltInCategory.OST_Walls) {
-                                        distToStartFace = distToStart - ((elem as Wall)?.WallType.Width ?? (150.0 / 304.8)) / 2.0;
                                         break;
                                     }
                                 }
                             }
                         }
 
-                        // 偵測終點(1)相連結構並計算 Face
+                        // 偵測終點(1)相連結構取得大梁深度
                         var conn1 = beamLoc.get_ElementsAtJoin(1);
                         if (conn1 != null)
                         {
-                            foreach (Element elem in conn1)
+                            foreach (ElementId id in conn1)
                             {
+                                Element elem = doc.GetElement(id);
                                 if (elem == null || elem.Id == beam.Id) continue;
                                 if (elem.Category != null)
                                 {
                                     int catId = elem.Category.Id.IntegerValue;
                                     if (catId == (int)BuiltInCategory.OST_StructuralFraming) {
                                         connDepthEnd = GetBeamDepth(elem) * 304.8;
-                                        distToEndFace = distToEnd - GetBeamWidth(elem) / 2.0;
-                                        break;
-                                    } else if (catId == (int)BuiltInCategory.OST_StructuralColumns) {
-                                        distToEndFace = distToEnd - GetColumnWidth(elem) / 2.0;
-                                        break;
-                                    } else if (catId == (int)BuiltInCategory.OST_Walls) {
-                                        distToEndFace = distToEnd - ((elem as Wall)?.WallType.Width ?? (150.0 / 304.8)) / 2.0;
                                         break;
                                     }
                                 }
@@ -691,7 +690,7 @@ namespace RevitMCP.Core
                     TextNote tn = TextNote.Create(doc, doc.ActiveView.Id, textPos, isOk ? "● PASS" : "● FAIL", defaultTextTypeId);
                     
                     // 加入指引箭頭指向套管中心
-                    Leader leader = tn.AddLeader(TextNoteLeaderTypes.TN_LT_Straight);
+                    Leader leader = tn.AddLeader(TextNoteLeaderTypes.TNLT_STRAIGHT_L);
                     leader.End = pos;
                     
                     tn.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.Set("BeamPenetration_Helper");
@@ -911,39 +910,10 @@ namespace RevitMCP.Core
                 int endIdx = (d0 < d1) ? 0 : 1;
                 XYZ targetEnd = (endIdx == 0) ? p0 : p1;
 
-                // 物理補償：若梁端點相連於牆或柱或主梁，將 targetEnd 朝向 beam 內側偏移相連寬度的一半
-                double offsetToInside = 0;
-                var connectedIds = beamLoc.get_ElementsAtJoin(endIdx);
-                if (connectedIds != null)
-                {
-                    foreach (Element elem in connectedIds)
-                    {
-                        if (elem == null || elem.Id == beam.Id) continue;
-                        if (elem != null)
-                        {
-                            if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_Walls)
-                            {
-                                double wallThickness = (elem as Wall)?.WallType.Width ?? (150.0 / 304.8);
-                                offsetToInside = wallThickness / 2.0;
-                                break;
-                            }
-                            else if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralColumns)
-                            {
-                                double colWidth = GetColumnWidth(elem);
-                                offsetToInside = colWidth / 2.0;
-                                break;
-                            }
-                            else if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralFraming)
-                            {
-                                double frameWidth = GetBeamWidth(elem);
-                                offsetToInside = frameWidth / 2.0;
-                                break;
-                            }
-                        }
-                    }
-                }
-
                 XYZ beamDir = (p1 - p0).Normalize();
+                double colWidth = GetCollisionWidthAtPoint(doc, targetEnd, beamDir, beam.Id);
+                double offsetToInside = colWidth / 2.0;
+
                 XYZ correctedTargetEnd = targetEnd + (endIdx == 0 ? beamDir : -beamDir) * offsetToInside;
                 XYZ perpDir = new XYZ(-beamDir.Y, beamDir.X, 0).Normalize();
 
@@ -967,6 +937,159 @@ namespace RevitMCP.Core
             {
                 // 靜默失敗以避免干擾主要上色與標籤流程
             }
+        }
+
+        private double GetCollisionWidthAtPoint(Document mainDoc, XYZ worldPoint, XYZ beamDir, ElementId excludeBeamId)
+        {
+            try
+            {
+                double size = 0.5; // 約 15 cm 的偵測範圍
+                Outline outline = new Outline(
+                    new XYZ(worldPoint.X - size / 2, worldPoint.Y - size / 2, worldPoint.Z - size / 2),
+                    new XYZ(worldPoint.X + size / 2, worldPoint.Y + size / 2, worldPoint.Z + size / 2)
+                );
+
+                // 1. 在主模型中搜尋柱
+                var mainCols = new FilteredElementCollector(mainDoc)
+                    .OfCategory(BuiltInCategory.OST_StructuralColumns)
+                    .WherePasses(new BoundingBoxIntersectsFilter(outline))
+                    .WhereElementIsNotElementType()
+                    .ToList();
+
+                foreach (var col in mainCols)
+                {
+                    BoundingBoxXYZ bbox = col.get_BoundingBox(null);
+                    if (bbox != null)
+                    {
+                        double w = Math.Abs(beamDir.X) > Math.Abs(beamDir.Y) ? (bbox.Max.X - bbox.Min.X) : (bbox.Max.Y - bbox.Min.Y);
+                        return w;
+                    }
+                }
+
+                // 2. 搜尋連結模型中的柱
+                var linkInstances = new FilteredElementCollector(mainDoc)
+                    .OfClass(typeof(RevitLinkInstance))
+                    .Cast<RevitLinkInstance>()
+                    .ToList();
+
+                foreach (var li in linkInstances)
+                {
+                    Document linkDoc = li.GetLinkDocument();
+                    if (linkDoc == null) continue;
+
+                    Transform tr = li.GetTotalTransform();
+                    XYZ localPoint = tr.Inverse.OfPoint(worldPoint);
+                    Outline localOutline = new Outline(
+                        new XYZ(localPoint.X - size / 2, localPoint.Y - size / 2, localPoint.Z - size / 2),
+                        new XYZ(localPoint.X + size / 2, localPoint.Y + size / 2, localPoint.Z + size / 2)
+                    );
+
+                    var linkCols = new FilteredElementCollector(linkDoc)
+                        .OfCategory(BuiltInCategory.OST_StructuralColumns)
+                        .WherePasses(new BoundingBoxIntersectsFilter(localOutline))
+                        .WhereElementIsNotElementType()
+                        .ToList();
+
+                    foreach (var col in linkCols)
+                    {
+                        BoundingBoxXYZ bbox = col.get_BoundingBox(null);
+                        if (bbox != null)
+                        {
+                            XYZ localBeamDir = tr.Inverse.OfVector(beamDir).Normalize();
+                            double w = Math.Abs(localBeamDir.X) > Math.Abs(localBeamDir.Y) ? (bbox.Max.X - bbox.Min.X) : (bbox.Max.Y - bbox.Min.Y);
+                            return w;
+                        }
+                    }
+                }
+
+                // 3. 在主模型中搜尋牆
+                var mainWalls = new FilteredElementCollector(mainDoc)
+                    .OfCategory(BuiltInCategory.OST_Walls)
+                    .WherePasses(new BoundingBoxIntersectsFilter(outline))
+                    .WhereElementIsNotElementType()
+                    .Cast<Wall>()
+                    .ToList();
+
+                foreach (var wall in mainWalls)
+                {
+                    return wall.WallType.Width;
+                }
+
+                // 4. 在連結模型中搜尋牆
+                foreach (var li in linkInstances)
+                {
+                    Document linkDoc = li.GetLinkDocument();
+                    if (linkDoc == null) continue;
+
+                    Transform tr = li.GetTotalTransform();
+                    XYZ localPoint = tr.Inverse.OfPoint(worldPoint);
+                    Outline localOutline = new Outline(
+                        new XYZ(localPoint.X - size / 2, localPoint.Y - size / 2, localPoint.Z - size / 2),
+                        new XYZ(localPoint.X + size / 2, localPoint.Y + size / 2, localPoint.Z + size / 2)
+                    );
+
+                    var linkWalls = new FilteredElementCollector(linkDoc)
+                        .OfCategory(BuiltInCategory.OST_Walls)
+                        .WherePasses(new BoundingBoxIntersectsFilter(localOutline))
+                        .WhereElementIsNotElementType()
+                        .Cast<Wall>()
+                        .ToList();
+
+                    foreach (var wall in linkWalls)
+                    {
+                        return wall.WallType.Width;
+                    }
+                }
+
+                // 5. 在主模型中搜尋大梁
+                var mainBeams = new FilteredElementCollector(mainDoc)
+                    .OfCategory(BuiltInCategory.OST_StructuralFraming)
+                    .WherePasses(new BoundingBoxIntersectsFilter(outline))
+                    .WhereElementIsNotElementType()
+                    .ToList();
+
+                foreach (var b in mainBeams)
+                {
+                    if (b.Id != excludeBeamId)
+                    {
+                        return GetBeamWidth(b);
+                    }
+                }
+
+                // 6. 在連結模型中搜尋大梁
+                foreach (var li in linkInstances)
+                {
+                    Document linkDoc = li.GetLinkDocument();
+                    if (linkDoc == null) continue;
+
+                    Transform tr = li.GetTotalTransform();
+                    XYZ localPoint = tr.Inverse.OfPoint(worldPoint);
+                    Outline localOutline = new Outline(
+                        new XYZ(localPoint.X - size / 2, localPoint.Y - size / 2, localPoint.Z - size / 2),
+                        new XYZ(localPoint.X + size / 2, localPoint.Y + size / 2, localPoint.Z + size / 2)
+                    );
+
+                    var linkBeams = new FilteredElementCollector(linkDoc)
+                        .OfCategory(BuiltInCategory.OST_StructuralFraming)
+                        .WherePasses(new BoundingBoxIntersectsFilter(localOutline))
+                        .WhereElementIsNotElementType()
+                        .ToList();
+
+                    foreach (var b in linkBeams)
+                    {
+                        if (b.Id != excludeBeamId)
+                        {
+                            return GetBeamWidth(b);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // 發生任何異常則不補償
+            }
+
+            return 0;
         }
 
         private double GetColumnWidth(Element col)
