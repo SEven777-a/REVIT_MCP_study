@@ -613,6 +613,25 @@ namespace RevitMCP.Core
                             CreatePenetrationDimension(doc, doc.ActiveView, sleeve, beam, beamTr);
                         }
                     }
+
+                    // 2.1 建立套管到相交小梁的水平尺寸標註 (Dimension)
+                    if (res["SideBeamIds"] != null)
+                    {
+                        JArray sideBeamIds = res["SideBeamIds"] as JArray;
+                        if (sideBeamIds != null)
+                        {
+                            foreach (var sbeamIdVal in sideBeamIds)
+                            {
+                                IdType sbeamId = sbeamIdVal.Value<IdType>();
+                                Transform sbeamTr;
+                                Element sbeam = FindElementInMainOrLinks(doc, sbeamId, out sbeamTr);
+                                if (sbeam != null)
+                                {
+                                    CreateSleeveToSideBeamDimension(doc, doc.ActiveView, sleeve, sbeam, sbeamTr);
+                                }
+                            }
+                        }
+                    }
                 }
                 trans.Commit();
             }
@@ -813,6 +832,46 @@ namespace RevitMCP.Core
                 }
             }
             return 600.0 / 304.8; // 預設 600mm
+        }
+
+        private void CreateSleeveToSideBeamDimension(Document doc, View view, Element sleeve, Element sideBeam, Transform tr)
+        {
+            try
+            {
+                BoundingBoxXYZ sleeveBBox = sleeve.get_BoundingBox(view);
+                if (sleeveBBox == null) return;
+                XYZ sleeveCenter = (sleeveBBox.Min + sleeveBBox.Max) * 0.5;
+
+                LocationCurve sideBeamLoc = sideBeam.Location as LocationCurve;
+                if (sideBeamLoc == null) return;
+
+                XYZ p0 = tr.OfPoint(sideBeamLoc.Curve.GetEndPoint(0));
+                XYZ p1 = tr.OfPoint(sideBeamLoc.Curve.GetEndPoint(1));
+
+                XYZ localSleeveCenter = tr.Inverse.OfPoint(sleeveCenter);
+                IntersectionResult ir = sideBeamLoc.Curve.Project(localSleeveCenter);
+                if (ir == null) return;
+                XYZ projPoint = tr.OfPoint(ir.XYZPoint);
+
+                XYZ dirToSleeve = (sleeveCenter - projPoint).Normalize();
+
+                double sideBeamWidth = GetBeamWidth(sideBeam);
+                XYZ sideBeamSidePoint = projPoint + dirToSleeve * (sideBeamWidth / 2.0);
+
+                double sleeveD = GetSleeveDiameter(sleeve, sleeveBBox);
+                double radius = sleeveD / 2.0;
+                XYZ sleeveEdgePoint = sleeveCenter - dirToSleeve * radius;
+
+                // 標註的 offset：往垂直於 dirToSleeve 的方向偏移
+                XYZ perpDir = new XYZ(-dirToSleeve.Y, dirToSleeve.X, 0).Normalize();
+                double offsetVal = 500.0;
+
+                CreateDimensionInternal(doc, view, sideBeamSidePoint.X * 304.8, sideBeamSidePoint.Y * 304.8, sleeveEdgePoint.X * 304.8, sleeveEdgePoint.Y * 304.8, offsetVal);
+            }
+            catch (Exception)
+            {
+                // 靜默失敗以避免干擾主要上色與標籤流程
+            }
         }
     }
 }
