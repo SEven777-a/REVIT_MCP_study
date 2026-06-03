@@ -228,11 +228,10 @@ namespace RevitMCP.Core
                         var conn0 = beamLoc.get_ElementsAtJoin(0);
                         if (conn0 != null)
                         {
-                            foreach (ElementId cid in conn0)
+                            foreach (Element elem in conn0)
                             {
-                                if (cid == beam.Id) continue;
-                                Element elem = doc.GetElement(cid);
-                                if (elem != null && elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralFraming)
+                                if (elem == null || elem.Id == beam.Id) continue;
+                                if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralFraming)
                                 {
                                     connDepthStart = GetBeamDepth(elem) * 304.8;
                                     break;
@@ -244,11 +243,10 @@ namespace RevitMCP.Core
                         var conn1 = beamLoc.get_ElementsAtJoin(1);
                         if (conn1 != null)
                         {
-                            foreach (ElementId cid in conn1)
+                            foreach (Element elem in conn1)
                             {
-                                if (cid == beam.Id) continue;
-                                Element elem = doc.GetElement(cid);
-                                if (elem != null && elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralFraming)
+                                if (elem == null || elem.Id == beam.Id) continue;
+                                if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_StructuralFraming)
                                 {
                                     connDepthEnd = GetBeamDepth(elem) * 304.8;
                                     break;
@@ -752,10 +750,9 @@ namespace RevitMCP.Core
                 var connectedIds = beamLoc.get_ElementsAtJoin(endIdx);
                 if (connectedIds != null)
                 {
-                    foreach (ElementId cid in connectedIds)
+                    foreach (Element elem in connectedIds)
                     {
-                        if (cid == beam.Id) continue;
-                        Element elem = beam.Document.GetElement(cid);
+                        if (elem == null || elem.Id == beam.Id) continue;
                         if (elem != null)
                         {
                             if (elem.Category != null && elem.Category.Id.IntegerValue == (int)BuiltInCategory.OST_Walls)
