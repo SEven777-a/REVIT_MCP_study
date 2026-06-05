@@ -684,10 +684,25 @@ namespace RevitMCP.Core
                     if (defaultTextTypeId == ElementId.InvalidElementId) {
                         defaultTextTypeId = new FilteredElementCollector(doc).OfClass(typeof(TextNoteType)).FirstElementId();
                     }
+
+                    // 確保文字標註沒有外框
+                    TextNoteType baseType = doc.GetElement(defaultTextTypeId) as TextNoteType;
+                    TextNoteType noBorderType = new FilteredElementCollector(doc)
+                        .OfClass(typeof(TextNoteType))
+                        .Cast<TextNoteType>()
+                        .FirstOrDefault(t => t.get_Parameter(BuiltInParameter.TEXT_BOX_VISIBILITY) != null && t.get_Parameter(BuiltInParameter.TEXT_BOX_VISIBILITY).AsInteger() == 0);
+
+                    if (noBorderType == null && baseType != null)
+                    {
+                        noBorderType = baseType.Duplicate(baseType.Name + "_NoBorder") as TextNoteType;
+                        noBorderType.get_Parameter(BuiltInParameter.TEXT_BOX_VISIBILITY)?.Set(0);
+                    }
                     
+                    ElementId finalTypeId = noBorderType != null ? noBorderType.Id : defaultTextTypeId;
+
                     // 將文字方塊往右上角偏移 (2ft)，避免擋住套管
                     XYZ textPos = new XYZ(pos.X + 2.0, pos.Y + 2.0, pos.Z);
-                    TextNote tn = TextNote.Create(doc, doc.ActiveView.Id, textPos, isOk ? "● PASS" : "● FAIL", defaultTextTypeId);
+                    TextNote tn = TextNote.Create(doc, doc.ActiveView.Id, textPos, isOk ? "● PASS" : "● FAIL", finalTypeId);
                     
                     // 加入指引箭頭指向套管中心
                     Leader leader = tn.AddLeader(TextNoteLeaderTypes.TNLT_STRAIGHT_L);
@@ -699,8 +714,15 @@ namespace RevitMCP.Core
                     textOgs.SetProjectionLineColor(color);
                     doc.ActiveView.SetElementOverrides(tn.Id, textOgs);
 
+                    // 讀取是否繪製柱邊距標註的旗標 (預設為 true)
+                    bool drawColumnDim = true;
+                    if (res["DrawColumnDim"] != null && res["DrawColumnDim"].Type != Newtonsoft.Json.Linq.JTokenType.Null)
+                    {
+                        drawColumnDim = res["DrawColumnDim"].Value<bool>();
+                    }
+
                     // 2. 獲取梁 ID 並建立套管到梁端點的水平尺寸標註 (Dimension)
-                    if (res["BeamId"] != null)
+                    if (drawColumnDim && res["BeamId"] != null && res["BeamId"].Type != Newtonsoft.Json.Linq.JTokenType.Null)
                     {
                         IdType beamId = res["BeamId"].Value<IdType>();
                         if (!beamDimCounts.ContainsKey(beamId)) beamDimCounts[beamId] = 0;
@@ -740,7 +762,7 @@ namespace RevitMCP.Core
                 foreach (var res in results)
                 {
                     IdType id = res["SleeveId"].Value<IdType>();
-                    IdType bId = res["BeamId"]?.Value<IdType>() ?? 0;
+                    IdType bId = (res["BeamId"] != null && res["BeamId"].Type != Newtonsoft.Json.Linq.JTokenType.Null) ? res["BeamId"].Value<IdType>() : 0;
                     if (bId == 0) continue;
                     Element slv = doc.GetElement(new ElementId(id));
                     if (slv == null) continue;
@@ -780,25 +802,66 @@ namespace RevitMCP.Core
                             XYZ c1 = (bb1.Min + bb1.Max) * 0.5;
                             XYZ c2 = (bb2.Min + bb2.Max) * 0.5;
                             if (c1.DistanceTo(c2) * 304.8 > 3000.0) continue; // 距離過遠(>3m)則不標註
+                            
+                            // 精確檢核：兩套管之間是否有正交梁穿過
+                            bool hasOrthogonalBeamBetween = false;
+                            IntersectionResult ir1 = bc.Project(bTr.Inverse.OfPoint(c1));
+                            IntersectionResult ir2 = bc.Project(bTr.Inverse.OfPoint(c2));
+                            if (ir1 != null && ir2 != null)
+                            {
+                                double minParam = Math.Min(ir1.Parameter, ir2.Parameter);
+                                double maxParam = Math.Max(ir1.Parameter, ir2.Parameter);
+                                
+                                Document targetDoc = bElem.Document; // 目標梁所在的文件 (主模型或連結模型)
+                                
+                                XYZ localC1 = bTr.Inverse.OfPoint(c1);
+                                XYZ localC2 = bTr.Inverse.OfPoint(c2);
+                                Outline localMidOutline = new Outline(
+                                    new XYZ(Math.Min(localC1.X, localC2.X) - 1, Math.Min(localC1.Y, localC2.Y) - 1, Math.Min(localC1.Z, localC2.Z) - 1),
+                                    new XYZ(Math.Max(localC1.X, localC2.X) + 1, Math.Max(localC1.Y, localC2.Y) + 1, Math.Max(localC1.Z, localC2.Z) + 1)
+                                );
 
-                            Outline midOutline = new Outline(
-                                new XYZ(Math.Min(c1.X, c2.X) - 1, Math.Min(c1.Y, c2.Y) - 1, Math.Min(c1.Z, c2.Z) - 1),
-                                new XYZ(Math.Max(c1.X, c2.X) + 1, Math.Max(c1.Y, c2.Y) + 1, Math.Max(c1.Z, c2.Z) + 1)
-                            );
+                                var intersectingBeams = new FilteredElementCollector(targetDoc)
+                                    .OfCategory(BuiltInCategory.OST_StructuralFraming)
+                                    .WherePasses(new BoundingBoxIntersectsFilter(localMidOutline))
+                                    .WhereElementIsNotElementType()
+                                    .Cast<FamilyInstance>()
+                                    .Where(b => b.Id != bElem.Id)
+                                    .ToList();
+
+                                XYZ mainDir = (bc.GetEndPoint(1) - bc.GetEndPoint(0)).Normalize();
+
+                                foreach (var ob in intersectingBeams)
+                                {
+                                    LocationCurve obLoc = ob.Location as LocationCurve;
+                                    if (obLoc == null) continue;
+                                    XYZ obDir = (obLoc.Curve.GetEndPoint(1) - obLoc.Curve.GetEndPoint(0)).Normalize();
+                                    
+                                    // 判斷是否為正交或有一定交角的小梁
+                                    if (Math.Abs(mainDir.DotProduct(obDir)) < 0.7) 
+                                    {
+                                        IntersectionResult obIr1 = bc.Project(obLoc.Curve.GetEndPoint(0));
+                                        IntersectionResult obIr2 = bc.Project(obLoc.Curve.GetEndPoint(1));
+                                        if (obIr1 != null && obIr2 != null)
+                                        {
+                                            double obParam = (obIr1.Parameter + obIr2.Parameter) / 2.0;
+                                            // 判斷小梁中心是否落在兩套管的投影範圍內
+                                            if (obParam > minParam && obParam < maxParam)
+                                            {
+                                                hasOrthogonalBeamBetween = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             
-                            bool hasBeam = new FilteredElementCollector(doc)
-                                .OfCategory(BuiltInCategory.OST_StructuralFraming)
-                                .WherePasses(new BoundingBoxIntersectsFilter(midOutline))
-                                .WhereElementIsNotElementType()
-                                .Cast<FamilyInstance>()
-                                .Any(b => b.Id != bElem.Id);
-                            
-                            if (hasBeam) continue; // 中間有小梁則不標註
+                            if (hasOrthogonalBeamBetween) continue; // 若中間有正交小梁，則不標註套管間距
                         }
 
-                        if (!beamDimCounts.ContainsKey(bId)) beamDimCounts[bId] = 0;
-                        int staggerIndex = beamDimCounts[bId]++;
-                        CreateSleeveSpacingDimension(doc, doc.ActiveView, sortedSlvs[i], sortedSlvs[i + 1], bElem, bTr, staggerIndex);
+                        // 間距標註使用固定的錯開索引，使其對齊在同一條線上，方便閱讀
+                        int spacingStaggerIndex = 2; // 固定為 2，代表固定外推 1000mm
+                        CreateSleeveSpacingDimension(doc, doc.ActiveView, sortedSlvs[i], sortedSlvs[i + 1], bElem, bTr, spacingStaggerIndex);
                     }
                 }
 

@@ -215,7 +215,8 @@ ws.on('open', () => {
 
             visualizationResults.push({
                 SleeveId: s.SleeveId,
-                BeamId: s.DrawFirstLayerDim ? s.BeamId : null,
+                BeamId: s.BeamId, // 永遠傳遞 BeamId 以便 C# 進行間距分組
+                DrawColumnDim: s.DrawFirstLayerDim, // 透過新屬性控制是否標註柱邊距
                 SideBeamIds: sideBeamIds,
                 IsOk: s.FinalStatus === 'PASS',
                 Message: s.FinalReason || "PASS"
