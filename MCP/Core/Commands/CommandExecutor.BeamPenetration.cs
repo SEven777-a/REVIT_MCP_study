@@ -714,50 +714,9 @@ namespace RevitMCP.Core
                     textOgs.SetProjectionLineColor(color);
                     doc.ActiveView.SetElementOverrides(tn.Id, textOgs);
 
-                    // 讀取是否繪製柱邊距標註的旗標 (預設為 true)
-                    bool drawColumnDim = true;
-                    if (res["DrawColumnDim"] != null && res["DrawColumnDim"].Type != Newtonsoft.Json.Linq.JTokenType.Null)
-                    {
-                        drawColumnDim = res["DrawColumnDim"].Value<bool>();
-                    }
-
-                    // 2. 獲取梁 ID 並建立套管到梁端點的水平尺寸標註 (Dimension)
-                    if (drawColumnDim && res["BeamId"] != null && res["BeamId"].Type != Newtonsoft.Json.Linq.JTokenType.Null)
-                    {
-                        IdType beamId = res["BeamId"].Value<IdType>();
-                        if (!beamDimCounts.ContainsKey(beamId)) beamDimCounts[beamId] = 0;
-                        int staggerIndex = beamDimCounts[beamId]++;
-                        Transform beamTr;
-                        Element beam = FindElementInMainOrLinks(doc, beamId, out beamTr);
-                        if (beam != null)
-                        {
-                            CreatePenetrationDimension(doc, doc.ActiveView, sleeve, beam, beamTr, staggerIndex);
-                        }
-                    }
-
-                    // 2.1 建立套管到相交小梁的水平尺寸標註 (Dimension)
-                    if (res["SideBeamIds"] != null)
-                    {
-                        JArray sideBeamIds = res["SideBeamIds"] as JArray;
-                        if (sideBeamIds != null)
-                        {
-                            foreach (var sbeamIdVal in sideBeamIds)
-                            {
-                                IdType sbeamId = sbeamIdVal.Value<IdType>();
-                                if (!beamDimCounts.ContainsKey(sbeamId)) beamDimCounts[sbeamId] = 0;
-                                int staggerIndex = beamDimCounts[sbeamId]++;
-                                Transform sbeamTr;
-                                Element sbeam = FindElementInMainOrLinks(doc, sbeamId, out sbeamTr);
-                                if (sbeam != null)
-                                {
-                                    CreateSleeveToSideBeamDimension(doc, doc.ActiveView, sleeve, sbeam, sbeamTr, staggerIndex);
-                                }
-                            }
-                        }
-                    }
                 }
 
-                // 3. 處理同一根大梁上套管間的淨距標註
+                // 3. 處理同一根大梁上所有節點的排序與淨距標註
                 Dictionary<IdType, List<Element>> beamSleeves = new Dictionary<IdType, List<Element>>();
                 foreach (var res in results)
                 {
@@ -774,100 +733,204 @@ namespace RevitMCP.Core
                 {
                     IdType bId = kvp.Key;
                     List<Element> slvs = kvp.Value;
-                    if (slvs.Count < 2) continue;
 
                     Transform bTr;
                     Element bElem = FindElementInMainOrLinks(doc, bId, out bTr);
                     if (bElem == null) continue;
                     LocationCurve bLoc = bElem.Location as LocationCurve;
                     if (bLoc == null) continue;
-                    Curve bc = bLoc.Curve;
 
-                    // 以套管投影到梁上的起點距離進行排序
-                    var sortedSlvs = slvs.OrderBy(s => {
-                        BoundingBoxXYZ bb = s.get_BoundingBox(null);
-                        if (bb == null) return 0.0;
-                        XYZ c = (bb.Min + bb.Max) * 0.5;
-                        IntersectionResult ir = bc.Project(bTr.Inverse.OfPoint(c));
-                        if (ir == null) return 0.0;
-                        return ir.XYZPoint.DistanceTo(bc.GetEndPoint(0));
-                    }).ToList();
-
-                    for (int i = 0; i < sortedSlvs.Count - 1; i++)
-                    {
-                        BoundingBoxXYZ bb1 = sortedSlvs[i].get_BoundingBox(null);
-                        BoundingBoxXYZ bb2 = sortedSlvs[i + 1].get_BoundingBox(null);
-                        if (bb1 != null && bb2 != null)
-                        {
-                            XYZ c1 = (bb1.Min + bb1.Max) * 0.5;
-                            XYZ c2 = (bb2.Min + bb2.Max) * 0.5;
-                            if (c1.DistanceTo(c2) * 304.8 > 3000.0) continue; // 距離過遠(>3m)則不標註
-                            
-                            // 精確檢核：兩套管之間是否有正交梁穿過
-                            bool hasOrthogonalBeamBetween = false;
-                            IntersectionResult ir1 = bc.Project(bTr.Inverse.OfPoint(c1));
-                            IntersectionResult ir2 = bc.Project(bTr.Inverse.OfPoint(c2));
-                            if (ir1 != null && ir2 != null)
-                            {
-                                double minParam = Math.Min(ir1.Parameter, ir2.Parameter);
-                                double maxParam = Math.Max(ir1.Parameter, ir2.Parameter);
-                                
-                                Document targetDoc = bElem.Document; // 目標梁所在的文件 (主模型或連結模型)
-                                
-                                XYZ localC1 = bTr.Inverse.OfPoint(c1);
-                                XYZ localC2 = bTr.Inverse.OfPoint(c2);
-                                Outline localMidOutline = new Outline(
-                                    new XYZ(Math.Min(localC1.X, localC2.X) - 1, Math.Min(localC1.Y, localC2.Y) - 1, Math.Min(localC1.Z, localC2.Z) - 1),
-                                    new XYZ(Math.Max(localC1.X, localC2.X) + 1, Math.Max(localC1.Y, localC2.Y) + 1, Math.Max(localC1.Z, localC2.Z) + 1)
-                                );
-
-                                var intersectingBeams = new FilteredElementCollector(targetDoc)
-                                    .OfCategory(BuiltInCategory.OST_StructuralFraming)
-                                    .WherePasses(new BoundingBoxIntersectsFilter(localMidOutline))
-                                    .WhereElementIsNotElementType()
-                                    .Cast<FamilyInstance>()
-                                    .Where(b => b.Id != bElem.Id)
-                                    .ToList();
-
-                                XYZ mainDir = (bc.GetEndPoint(1) - bc.GetEndPoint(0)).Normalize();
-
-                                foreach (var ob in intersectingBeams)
-                                {
-                                    LocationCurve obLoc = ob.Location as LocationCurve;
-                                    if (obLoc == null) continue;
-                                    XYZ obDir = (obLoc.Curve.GetEndPoint(1) - obLoc.Curve.GetEndPoint(0)).Normalize();
-                                    
-                                    // 判斷是否為正交或有一定交角的小梁
-                                    if (Math.Abs(mainDir.DotProduct(obDir)) < 0.7) 
-                                    {
-                                        IntersectionResult obIr1 = bc.Project(obLoc.Curve.GetEndPoint(0));
-                                        IntersectionResult obIr2 = bc.Project(obLoc.Curve.GetEndPoint(1));
-                                        if (obIr1 != null && obIr2 != null)
-                                        {
-                                            double obParam = (obIr1.Parameter + obIr2.Parameter) / 2.0;
-                                            // 判斷小梁中心是否落在兩套管的投影範圍內
-                                            if (obParam > minParam && obParam < maxParam)
-                                            {
-                                                hasOrthogonalBeamBetween = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if (hasOrthogonalBeamBetween) continue; // 若中間有正交小梁，則不標註套管間距
-                        }
-
-                        // 間距標註使用固定的錯開索引，使其對齊在同一條線上，方便閱讀
-                        int spacingStaggerIndex = 2; // 固定為 2，代表固定外推 1000mm
-                        CreateSleeveSpacingDimension(doc, doc.ActiveView, sortedSlvs[i], sortedSlvs[i + 1], bElem, bTr, spacingStaggerIndex);
-                    }
+                    CreateSequentialDimensions(doc, doc.ActiveView, bElem, slvs, bTr);
                 }
 
                 trans.Commit();
             }
             return new { Success = true };
+        }
+
+        private class DimNode
+        {
+            public XYZ LeftEdge;
+            public XYZ RightEdge;
+            public double CenterDist;
+            public string NodeType; // "Boundary", "Sleeve", "OrthogonalBeam"
+        }
+
+        private void GetBeamEndFaces(Element beam, Transform tr, XYZ p0, XYZ p1, out XYZ faceEnd0, out XYZ faceEnd1)
+        {
+            faceEnd0 = p0;
+            faceEnd1 = p1;
+            XYZ beamDir = (p1 - p0).Normalize();
+            XYZ midPoint = (p0 + p1) * 0.5;
+
+            Options opt = new Options() { ComputeReferences = true, DetailLevel = ViewDetailLevel.Fine };
+            GeometryElement geomElem = beam.get_Geometry(opt);
+            if (geomElem != null)
+            {
+                double minDot0 = double.MaxValue;
+                double minDot1 = double.MaxValue;
+                
+                foreach (GeometryObject geomObj in geomElem)
+                {
+                    Solid solid = geomObj as Solid;
+                    if (solid == null && geomObj is GeometryInstance geomInst)
+                    {
+                        solid = geomInst.GetInstanceGeometry().OfType<Solid>().FirstOrDefault(s => s.Faces.Size > 0);
+                    }
+                    if (solid != null && solid.Faces.Size > 0)
+                    {
+                        foreach (Face face in solid.Faces)
+                        {
+                            if (face is PlanarFace pf)
+                            {
+                                double dot = Math.Abs(pf.FaceNormal.DotProduct(tr.Inverse.OfVector(beamDir)));
+                                if (dot > 0.99)
+                                {
+                                    XYZ faceCenter = pf.Evaluate(new UV(0.5, 0.5));
+                                    XYZ globalFaceCenter = tr.OfPoint(faceCenter);
+                                    if (globalFaceCenter.DistanceTo(p0) < globalFaceCenter.DistanceTo(p1))
+                                    {
+                                        double dist = globalFaceCenter.DistanceTo(midPoint);
+                                        if (dist < minDot0)
+                                        {
+                                            minDot0 = dist;
+                                            LocationCurve beamLoc = beam.Location as LocationCurve;
+                                            IntersectionResult fr = beamLoc?.Curve.Project(tr.Inverse.OfPoint(globalFaceCenter));
+                                            if (fr != null) faceEnd0 = tr.OfPoint(fr.XYZPoint);
+                                            else faceEnd0 = globalFaceCenter;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        double dist = globalFaceCenter.DistanceTo(midPoint);
+                                        if (dist < minDot1)
+                                        {
+                                            minDot1 = dist;
+                                            LocationCurve beamLoc = beam.Location as LocationCurve;
+                                            IntersectionResult fr = beamLoc?.Curve.Project(tr.Inverse.OfPoint(globalFaceCenter));
+                                            if (fr != null) faceEnd1 = tr.OfPoint(fr.XYZPoint);
+                                            else faceEnd1 = globalFaceCenter;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void CreateSequentialDimensions(Document doc, View view, Element bElem, List<Element> slvs, Transform bTr)
+        {
+            try
+            {
+                LocationCurve bLoc = bElem.Location as LocationCurve;
+                if (bLoc == null) return;
+                Curve bc = bLoc.Curve;
+
+                XYZ p0 = bTr.OfPoint(bc.GetEndPoint(0));
+                XYZ p1 = bTr.OfPoint(bc.GetEndPoint(1));
+                XYZ beamDir = (p1 - p0).Normalize();
+
+                GetBeamEndFaces(bElem, bTr, p0, p1, out XYZ faceEnd0, out XYZ faceEnd1);
+
+                List<DimNode> nodes = new List<DimNode>();
+
+                // 1. Boundary Nodes (表示梁本身的端點/相連柱/相交大梁等邊界)
+                nodes.Add(new DimNode { LeftEdge = faceEnd0, RightEdge = faceEnd0, CenterDist = p0.DistanceTo(faceEnd0), NodeType = "Boundary" });
+                nodes.Add(new DimNode { LeftEdge = faceEnd1, RightEdge = faceEnd1, CenterDist = p0.DistanceTo(faceEnd1), NodeType = "Boundary" });
+
+                // 2. Sleeve Nodes (套管)
+                foreach (var s in slvs)
+                {
+                    BoundingBoxXYZ sbb = s.get_BoundingBox(view);
+                    if (sbb == null) continue;
+                    XYZ sCenter = (sbb.Min + sbb.Max) * 0.5;
+                    IntersectionResult ir = bc.Project(bTr.Inverse.OfPoint(sCenter));
+                    if (ir == null) continue;
+                    XYZ projPoint = bTr.OfPoint(ir.XYZPoint);
+                    double d = p0.DistanceTo(projPoint);
+                    
+                    double sleeveD = GetSleeveDiameter(s, sbb);
+                    double radius = sleeveD / 2.0;
+
+                    nodes.Add(new DimNode {
+                        LeftEdge = projPoint - beamDir * radius,
+                        RightEdge = projPoint + beamDir * radius,
+                        CenterDist = d,
+                        NodeType = "Sleeve"
+                    });
+                }
+
+                // 3. Orthogonal Beam Nodes (正交小梁)
+                Outline localBeamOutline = new Outline(bElem.get_BoundingBox(null).Min, bElem.get_BoundingBox(null).Max);
+                var intersectingBeams = new FilteredElementCollector(bElem.Document)
+                    .OfCategory(BuiltInCategory.OST_StructuralFraming)
+                    .WherePasses(new BoundingBoxIntersectsFilter(localBeamOutline))
+                    .WhereElementIsNotElementType()
+                    .Cast<FamilyInstance>()
+                    .Where(b => b.Id != bElem.Id)
+                    .ToList();
+
+                foreach (var ob in intersectingBeams)
+                {
+                    LocationCurve obLoc = ob.Location as LocationCurve;
+                    if (obLoc == null) continue;
+                    XYZ obDir = bTr.OfVector((obLoc.Curve.GetEndPoint(1) - obLoc.Curve.GetEndPoint(0)).Normalize()).Normalize();
+                    
+                    if (Math.Abs(beamDir.DotProduct(obDir)) < 0.7) 
+                    {
+                        // 找到交點
+                        IntersectionResult obIr1 = bc.Project(obLoc.Curve.GetEndPoint(0));
+                        IntersectionResult obIr2 = bc.Project(obLoc.Curve.GetEndPoint(1));
+                        if (obIr1 != null && obIr2 != null)
+                        {
+                            XYZ projPoint = bTr.OfPoint(bc.Evaluate((obIr1.Parameter + obIr2.Parameter) / 2.0, false));
+                            double d = p0.DistanceTo(projPoint);
+                            
+                            // 只有在梁範圍內的才加入
+                            if (d > 0 && d < p0.DistanceTo(p1))
+                            {
+                                double w = GetBeamWidth(ob);
+                                double radius = w / 2.0;
+                                nodes.Add(new DimNode {
+                                    LeftEdge = projPoint - beamDir * radius,
+                                    RightEdge = projPoint + beamDir * radius,
+                                    CenterDist = d,
+                                    NodeType = "OrthogonalBeam"
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // 按照距離排序 (由起點到終點)
+                nodes = nodes.OrderBy(n => n.CenterDist).ToList();
+
+                // Generate non-overlapping Dimensions
+                for (int i = 0; i < nodes.Count - 1; i++)
+                {
+                    var A = nodes[i];
+                    var B = nodes[i + 1];
+
+                    // 只有當兩者之一包含套管時，才畫標註 (避免只畫出柱子到正交梁的無意義標註)
+                    if (A.NodeType == "Sleeve" || B.NodeType == "Sleeve")
+                    {
+                        // 確保間距大於 0 才標註，避免交錯
+                        double gap = B.CenterDist - A.CenterDist;
+                        if (gap > 0.1) // 至少大於約 3cm (0.1ft) 避免重疊
+                        {
+                            // 使用交錯的錯開距離避免文字擠在一起
+                            int staggerIndex = i % 2;
+                            double offsetVal = 500.0 + (staggerIndex * 250.0);
+                            
+                            // 統一呼叫尺寸標註方法 (從 A 的右邊緣 到 B 的左邊緣)
+                            CreateDimensionInternal(doc, view, A.RightEdge.X * 304.8, A.RightEdge.Y * 304.8, B.LeftEdge.X * 304.8, B.LeftEdge.Y * 304.8, offsetVal);
+                        }
+                    }
+                }
+            }
+            catch (Exception) { }
         }
 
         /// <summary>

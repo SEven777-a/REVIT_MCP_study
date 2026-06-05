@@ -66,8 +66,7 @@ ws.on('open', () => {
             let limitD = H / 3.0; 
             let reqDistLimit = 1.0 * H;
             
-            s.DrawFirstLayerDim = true;
-            s.DrawSecondLayerDim = false;
+            // 標註層級控制屬性已移除，改交由 C# 的虛擬節點排序處理
 
             // 規則 2, 3, 4: 開孔位置分區判定 (大梁與小梁分流)
             if (s.BeamUsage === 'Minor') {
@@ -109,7 +108,7 @@ ws.on('open', () => {
 
                 // 第二優先檢核：與相交小梁的邊緣距離 (從 C# 傳來的 NearestSideBeam 資訊)
                 if (s.NearestSideBeamId && s.NearestSideBeamId !== 0) {
-                    s.DrawSecondLayerDim = true;
+                    // 距離已計算完畢，標註邏輯移交 C#
                     // DistToNearestSideBeamCenter 是從套管中心到小梁中心線的距離
                     const distToSideBeamEdge = s.DistToNearestSideBeamCenter - (s.NearestSideBeamWidth / 2.0) - (D / 2.0);
                     const reqDistLimitB = 0.5 * s.NearestSideBeamDepth; // 相交梁深的一半
@@ -119,10 +118,7 @@ ws.on('open', () => {
                         reasons.push(`大梁套管距正交小梁(${s.NearestSideBeamName})邊緣不足(${distToSideBeamEdge.toFixed(0)} < 0.5*H_minor=${reqDistLimitB.toFixed(0)})`);
                     }
                     
-                    // 第三層檢核邏輯：如果第一層(柱邊距離)通過，就只保留第二層(正交小梁)的標註
-                    if (dist >= 1.0 * H) {
-                        s.DrawFirstLayerDim = false;
-                    }
+                    // 第三層檢核邏輯：原本會隱藏柱邊距標註的邏輯已移除，不論是否大於 1.0H，皆會保留與柱邊的標註。
                 }
             }
 
@@ -168,18 +164,10 @@ ws.on('open', () => {
             const startGroup = sleevesOnBeam.filter(s => s.DistanceToStart <= s.DistanceToEnd);
             const endGroup = sleevesOnBeam.filter(s => s.DistanceToStart > s.DistanceToEnd);
 
-            // 靠近起點的群組：以距起點距離由小到大排序
+            // 第一層標註(柱邊距)的隱藏邏輯已移除，因為 C# 會根據節點排序自動處理相鄰標註
+            // 靠近起點與終點的群組排序檢核邏輯（僅做檢核，不再控制繪圖）
             startGroup.sort((a, b) => a.DistanceToStart - b.DistanceToStart);
-            // 如果前面的套管沒問題，後面的就不需要標註到柱邊(第一層標註)
-            for (let i = 1; i < startGroup.length; i++) {
-                startGroup[i].DrawFirstLayerDim = false;
-            }
-
-            // 靠近終點的群組：以距終點距離由小到大排序
             endGroup.sort((a, b) => a.DistanceToEnd - b.DistanceToEnd);
-            for (let i = 1; i < endGroup.length; i++) {
-                endGroup[i].DrawFirstLayerDim = false;
-            }
 
             // 原本的淨距檢核：依然依照起點距離統一排序來檢核兩兩淨距
             sleevesOnBeam.sort((a, b) => a.DistanceToStart - b.DistanceToStart);
@@ -207,17 +195,9 @@ ws.on('open', () => {
         activeResults.forEach(s => {
             if (s.FinalStatus === 'PASS') passCount++; else failCount++;
 
-            // 找出此套管緊鄰側面（相鄰小梁）的梁 ID
-            let sideBeamIds = [];
-            if (s.DrawSecondLayerDim && s.NearestSideBeamId) {
-                sideBeamIds.push(s.NearestSideBeamId);
-            }
-
             visualizationResults.push({
                 SleeveId: s.SleeveId,
-                BeamId: s.BeamId, // 永遠傳遞 BeamId 以便 C# 進行間距分組
-                DrawColumnDim: s.DrawFirstLayerDim, // 透過新屬性控制是否標註柱邊距
-                SideBeamIds: sideBeamIds,
+                BeamId: s.BeamId, // 永遠傳遞 BeamId 以便 C# 進行間距分組與排序
                 IsOk: s.FinalStatus === 'PASS',
                 Message: s.FinalReason || "PASS"
             });
