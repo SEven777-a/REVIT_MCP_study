@@ -760,8 +760,11 @@ namespace RevitMCP.Core
         {
             faceEnd0 = p0;
             faceEnd1 = p1;
+            
+            LocationCurve beamLoc = beam.Location as LocationCurve;
+            if (beamLoc == null) return;
+            Curve bc = beamLoc.Curve;
             XYZ beamDir = (p1 - p0).Normalize();
-            XYZ midPoint = (p0 + p1) * 0.5;
 
             Options opt = new Options() { ComputeReferences = true, DetailLevel = ViewDetailLevel.Fine };
             GeometryElement geomElem = beam.get_Geometry(opt);
@@ -769,47 +772,50 @@ namespace RevitMCP.Core
             {
                 double minDot0 = double.MaxValue;
                 double minDot1 = double.MaxValue;
-                
-                foreach (GeometryObject geomObj in geomElem)
+
+                Stack<GeometryObject> geoms = new Stack<GeometryObject>();
+                foreach (GeometryObject go in geomElem) geoms.Push(go);
+
+                while (geoms.Count > 0)
                 {
-                    Solid solid = geomObj as Solid;
-                    if (solid == null && geomObj is GeometryInstance geomInst)
+                    GeometryObject go = geoms.Pop();
+                    if (go is GeometryInstance geomInst)
                     {
-                        solid = geomInst.GetInstanceGeometry().OfType<Solid>().FirstOrDefault(s => s.Faces.Size > 0);
+                        foreach (GeometryObject instGo in geomInst.GetInstanceGeometry()) geoms.Push(instGo);
                     }
-                    if (solid != null && solid.Faces.Size > 0)
+                    else if (go is Solid solid && solid.Faces.Size > 0 && solid.Volume > 0)
                     {
                         foreach (Face face in solid.Faces)
                         {
                             if (face is PlanarFace pf)
                             {
                                 double dot = Math.Abs(pf.FaceNormal.DotProduct(tr.Inverse.OfVector(beamDir)));
-                                if (dot > 0.99)
+                                if (dot > 0.8)
                                 {
                                     XYZ faceCenter = pf.Evaluate(new UV(0.5, 0.5));
                                     XYZ globalFaceCenter = tr.OfPoint(faceCenter);
-                                    if (globalFaceCenter.DistanceTo(p0) < globalFaceCenter.DistanceTo(p1))
+                                    
+                                    IntersectionResult ir = bc.Project(tr.Inverse.OfPoint(globalFaceCenter));
+                                    if (ir != null)
                                     {
-                                        double dist = globalFaceCenter.DistanceTo(midPoint);
-                                        if (dist < minDot0)
+                                        double distToP0 = globalFaceCenter.DistanceTo(p0);
+                                        double distToP1 = globalFaceCenter.DistanceTo(p1);
+                                        
+                                        if (distToP0 < distToP1)
                                         {
-                                            minDot0 = dist;
-                                            LocationCurve beamLoc = beam.Location as LocationCurve;
-                                            IntersectionResult fr = beamLoc?.Curve.Project(tr.Inverse.OfPoint(globalFaceCenter));
-                                            if (fr != null) faceEnd0 = tr.OfPoint(fr.XYZPoint);
-                                            else faceEnd0 = globalFaceCenter;
+                                            if (distToP0 < minDot0)
+                                            {
+                                                minDot0 = distToP0;
+                                                faceEnd0 = tr.OfPoint(ir.XYZPoint);
+                                            }
                                         }
-                                    }
-                                    else
-                                    {
-                                        double dist = globalFaceCenter.DistanceTo(midPoint);
-                                        if (dist < minDot1)
+                                        else
                                         {
-                                            minDot1 = dist;
-                                            LocationCurve beamLoc = beam.Location as LocationCurve;
-                                            IntersectionResult fr = beamLoc?.Curve.Project(tr.Inverse.OfPoint(globalFaceCenter));
-                                            if (fr != null) faceEnd1 = tr.OfPoint(fr.XYZPoint);
-                                            else faceEnd1 = globalFaceCenter;
+                                            if (distToP1 < minDot1)
+                                            {
+                                                minDot1 = distToP1;
+                                                faceEnd1 = tr.OfPoint(ir.XYZPoint);
+                                            }
                                         }
                                     }
                                 }
@@ -880,25 +886,76 @@ namespace RevitMCP.Core
                     
                     if (Math.Abs(beamDir.DotProduct(obDir)) < 0.7) 
                     {
-                        // 找到交點
-                        IntersectionResult obIr1 = bc.Project(obLoc.Curve.GetEndPoint(0));
-                        IntersectionResult obIr2 = bc.Project(obLoc.Curve.GetEndPoint(1));
-                        if (obIr1 != null && obIr2 != null)
+                        // 實體極值投影法：直接剖析正交梁的實體幾何
+                        Options opt = new Options() { ComputeReferences = true, DetailLevel = ViewDetailLevel.Fine };
+                        GeometryElement geomElem = ob.get_Geometry(opt);
+                        if (geomElem == null) continue;
+
+                        double minParam = double.MaxValue;
+                        double maxParam = double.MinValue;
+                        bool foundAny = false;
+
+                        Stack<GeometryObject> geoms = new Stack<GeometryObject>();
+                        foreach (GeometryObject go in geomElem) geoms.Push(go);
+
+                        while (geoms.Count > 0)
                         {
-                            XYZ projPoint = bTr.OfPoint(bc.Evaluate((obIr1.Parameter + obIr2.Parameter) / 2.0, false));
-                            double d = p0.DistanceTo(projPoint);
-                            
-                            // 只有在梁範圍內的才加入
-                            if (d > 0 && d < p0.DistanceTo(p1))
+                            GeometryObject go = geoms.Pop();
+                            if (go is GeometryInstance geomInst)
                             {
-                                double w = GetBeamWidth(ob);
-                                double radius = w / 2.0;
-                                nodes.Add(new DimNode {
-                                    LeftEdge = projPoint - beamDir * radius,
-                                    RightEdge = projPoint + beamDir * radius,
-                                    CenterDist = d,
-                                    NodeType = "OrthogonalBeam"
-                                });
+                                foreach (GeometryObject instGo in geomInst.GetInstanceGeometry()) geoms.Push(instGo);
+                            }
+                            else if (go is Solid solid && solid.Faces.Size > 0 && solid.Volume > 0)
+                            {
+                                foreach (Edge edge in solid.Edges)
+                                {
+                                    foreach (XYZ pt in edge.Tessellate())
+                                    {
+                                        IntersectionResult ir = bc.Project(pt);
+                                        if (ir != null)
+                                        {
+                                            if (ir.Parameter < minParam) minParam = ir.Parameter;
+                                            if (ir.Parameter > maxParam) maxParam = ir.Parameter;
+                                            foundAny = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (foundAny)
+                        {
+                            // 取得主梁端點在曲線上的參數位置
+                            double p0Param = bc.Project(bTr.Inverse.OfPoint(p0))?.Parameter ?? 0;
+                            double p1Param = bc.Project(bTr.Inverse.OfPoint(p1))?.Parameter ?? 1;
+
+                            double startParam = Math.Min(p0Param, p1Param);
+                            double endParam = Math.Max(p0Param, p1Param);
+
+                            // 如果投影範圍至少有一部分落在主梁上
+                            if (maxParam > startParam && minParam < endParam)
+                            {
+                                // 裁切超出大梁起迄範圍的部分
+                                if (minParam < startParam) minParam = startParam;
+                                if (maxParam > endParam) maxParam = endParam;
+
+                                // 只有當跨度在合理範圍內 (例如 < 2m)，才認為它是正交交接，避免抓到平行貼合的超長梁
+                                if (maxParam - minParam < (2000.0 / 304.8) && maxParam - minParam > 0.01)
+                                {
+                                    XYZ leftP = bTr.OfPoint(bc.Evaluate(minParam, false));
+                                    XYZ rightP = bTr.OfPoint(bc.Evaluate(maxParam, false));
+                                    
+                                    // 確保 LeftEdge 永遠是靠近 p0 的那一端
+                                    double dLeft = p0.DistanceTo(leftP);
+                                    double dRight = p0.DistanceTo(rightP);
+
+                                    nodes.Add(new DimNode {
+                                        LeftEdge = dLeft < dRight ? leftP : rightP,
+                                        RightEdge = dLeft < dRight ? rightP : leftP,
+                                        CenterDist = (dLeft + dRight) / 2.0,
+                                        NodeType = "OrthogonalBeam"
+                                    });
+                                }
                             }
                         }
                     }
