@@ -22,11 +22,11 @@ version: 1.0.0
 
 2. **執行核心分析腳本**
    - 由於目前核心計算邏輯與測試完美封裝在 Node.js 腳本中，請直接透過終端機執行測試腳本。
-   - 執行命令：`node scratch/test_penetration.js`
+   - 執行命令：`node scripts/checkBeamPenetration.js`
    - 該腳本會自動向 Revit 發送 `advanced_analyze` 與 `visualize_penetration` 指令，並在終端機印出報告。
 
 3. **報告產出與回報**
-   - 讀取腳本產出的報告檔案：`scratch/sleeve_report.md`
+   - 讀取腳本產出的報告檔案：`scripts/sleeve_report.md`
    - 將總結（PASS 與 FAIL 的數量）以簡潔的格式回報給使用者。
    - 提醒使用者可以前往 Revit 查看標色與尺寸標註。
 
@@ -39,5 +39,5 @@ version: 1.0.0
 - **降維排隊標註 (`visualize_penetration`)**：
   - 將 3D 面向的端點與套管降維至 1D 陣列。
   - 依照中心距離排序後，強制由「左側節點之右邊緣」標註至「右側節點之左邊緣」，自動規避空間方向誤判。
-- **法規判定 (`test_penetration.js`)**：
+- **法規判定 (`checkBeamPenetration.js`)**：
   - 依據提取出的正確尺寸資料，套用 `beam-penetration-rc` 之建築法規（1.0H 禁開區、相鄰淨距、頂底距離）。
