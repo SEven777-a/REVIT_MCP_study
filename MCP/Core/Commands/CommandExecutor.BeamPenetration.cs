@@ -801,9 +801,14 @@ namespace RevitMCP.Core
                                         double distToP0 = globalFaceCenter.DistanceTo(p0);
                                         double distToP1 = globalFaceCenter.DistanceTo(p1);
                                         
+                                        // 確保我們找到的截斷面「真的是在端點附近」，而不是因為穿牆而在梁中段產生的內部面
+                                        double beamLength = p0.DistanceTo(p1);
+                                        // 截斷面距離不可超過梁長的 1/3，且絕對值不超過 2 公尺 (2000mm)
+                                        double maxAllowedCutback = Math.Min(beamLength / 3.0, 2000.0 / 304.8);
+                                        
                                         if (distToP0 < distToP1)
                                         {
-                                            if (distToP0 < minDot0)
+                                            if (distToP0 < minDot0 && distToP0 <= maxAllowedCutback)
                                             {
                                                 minDot0 = distToP0;
                                                 faceEnd0 = tr.OfPoint(ir.XYZPoint);
@@ -811,7 +816,7 @@ namespace RevitMCP.Core
                                         }
                                         else
                                         {
-                                            if (distToP1 < minDot1)
+                                            if (distToP1 < minDot1 && distToP1 <= maxAllowedCutback)
                                             {
                                                 minDot1 = distToP1;
                                                 faceEnd1 = tr.OfPoint(ir.XYZPoint);
