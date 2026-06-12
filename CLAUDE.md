@@ -33,9 +33,9 @@ These counts must be derived from source, not copied by memory.
 
 | Item | Current Count | Source of Truth |
 |---|---:|---|
-| Runtime MCP tools | 96 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
-| Domain SOP files | 44 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
-| Claude skills | 21 | `.claude/skills/*/SKILL.md` |
+| Runtime MCP tools | 98 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
+| Domain SOP files | 45 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
+| Claude skills | 22 | `.claude/skills/*/SKILL.md` |
 
 When these numbers change, update `CLAUDE.md`, `README.md`, `README.en.md`, `docs/DOCUMENT_AUDIENCE_INVENTORY.md`, and any public site copy that makes grand-total claims. Then run `scripts/verify-qaqc.ps1 -SkipBuild -SkipDeploy`.
 
@@ -272,6 +272,7 @@ Read the matching file before applying a workflow or calculation.
 | section datum, crop box, section adjustment | `domain/section-datum-adjustment.md` |
 | sheet, viewport, titleblock, sheet management | `domain/sheet-viewport-management.md` |
 | smoke exhaust, smoke vent, effective opening | `domain/smoke-exhaust-review.md` |
+| smoke detector, 偵煙探測器, 探測器設置, 出風口距離, FCU 距離 | `domain/smoke-detector-check.md` |
 | stair compliance, stair headroom, stair check | `domain/stair-compliance-check.md` |
 | stair hidden line, stair graphics | `domain/stair-hidden-line-workflow.md` |
 | wall orientation, wall check | `domain/wall-check.md` |
@@ -311,6 +312,7 @@ Available Claude skills:
 - `/parking-check`
 - `/qa-review`
 - `/sheet-management`
+- `/smoke-detector-check`
 - `/smoke-exhaust`
 - `/stair-hidden-line`
 - `/wall-orientation-check`

@@ -27,16 +27,18 @@ import { structureTools } from "./structure-tools.js";
 import { doorWindowLegendTools } from "./door-window-legend-tools.js";
 import { listSeedsTools } from "./list-seeds-tools.js";
 import { dwgColumnTools } from "./dwg-column-tools.js";
+import { smokeDetectorTools } from "./smoke-detector-tools.js";
+import { corridorAnalysisTools } from "./corridor-analysis-tools.js";
 
 /**
  * Profile 對照表：每個 profile 包含哪些模組
  */
 const PROFILE_MODULES: Record<string, Tool[][]> = {
-    full: [baseTools, wallTools, roomTools, corridorAnalysisTools, visualizationTools, scheduleTools, mepTools, curtainWallTools, smokeExhaustTools, STAIR_COMPLIANCE_TOOLS, sheetTools, detailComponentTools, dimensionTools, dependentViewTools, dwgColumnTools, clashTools, structureTools, doorWindowLegendTools, listSeedsTools],
+    full: [baseTools, wallTools, roomTools, corridorAnalysisTools, visualizationTools, scheduleTools, mepTools, curtainWallTools, smokeExhaustTools, smokeDetectorTools, STAIR_COMPLIANCE_TOOLS, sheetTools, detailComponentTools, dimensionTools, dependentViewTools, dwgColumnTools, clashTools, structureTools, doorWindowLegendTools, listSeedsTools],
     architect: [baseTools, wallTools, roomTools, corridorAnalysisTools, visualizationTools, scheduleTools, curtainWallTools, STAIR_COMPLIANCE_TOOLS, sheetTools, detailComponentTools, dimensionTools, dependentViewTools, dwgColumnTools, doorWindowLegendTools, listSeedsTools],
-    mep: [baseTools, mepTools, scheduleTools, visualizationTools, smokeExhaustTools, clashTools],
+    mep: [baseTools, mepTools, scheduleTools, visualizationTools, smokeExhaustTools, smokeDetectorTools, clashTools],
     structural: [baseTools, wallTools, visualizationTools, dwgColumnTools, clashTools, structureTools],
-    "fire-safety": [baseTools, roomTools, corridorAnalysisTools, visualizationTools, smokeExhaustTools],
+    "fire-safety": [baseTools, roomTools, corridorAnalysisTools, visualizationTools, smokeExhaustTools, smokeDetectorTools],
 };
 
 /**
