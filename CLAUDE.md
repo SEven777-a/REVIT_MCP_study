@@ -33,9 +33,9 @@ These counts must be derived from source, not copied by memory.
 
 | Item | Current Count | Source of Truth |
 |---|---:|---|
-| Runtime MCP tools | 96 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
+| Runtime MCP tools | 98 | `registerRevitTools()` from `MCP-Server/src/tools/index.ts` |
 | Domain SOP files | 44 | `domain/*.md` except `domain/README.md`, plus `domain/references/*.md` |
-| Claude skills | 21 | `.claude/skills/*/SKILL.md` |
+| Claude skills | 22 | `.claude/skills/*/SKILL.md` |
 
 When these numbers change, update `CLAUDE.md`, `README.md`, `README.en.md`, `docs/DOCUMENT_AUDIENCE_INVENTORY.md`, and any public site copy that makes grand-total claims. Then run `scripts/verify-qaqc.ps1 -SkipBuild -SkipDeploy`.
 
@@ -314,6 +314,7 @@ Available Claude skills:
 - `/smoke-exhaust`
 - `/stair-hidden-line`
 - `/wall-orientation-check`
+- `/wall-section-batch`
 
 Use the smallest relevant skill set. If a skill and a domain file conflict on the method, the domain file wins.
 
