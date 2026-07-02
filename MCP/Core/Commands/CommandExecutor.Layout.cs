@@ -201,17 +201,12 @@ namespace RevitMCP.Core
             const double V_MARGIN_MM = 15.0;              // 垂直行間距 (mm)
 
             // ================================================
-            // 第一階段：計算所有視圖的物理尺寸並分行規劃
+            // 第一階段：計算所有視圖的「膨脹矩形」尺寸 (domain §3.2)
+            //   佔用尺寸 = 視圖本體 + 氣泡 + 標題列
+            //   膨脹尺寸 = 佔用尺寸 + 間距 (間距以膨脹矩形統一控制)
             // ================================================
-
-            // 共用變數
             var errors = new List<string>();
-            var sheetLayouts = new List<List<ViewportPlacement>>();
-            sheetLayouts.Add(new List<ViewportPlacement>());
-            int sheetIndex = 0;
-
-            // 輔助結構：帶有計算好尺寸的視圖資訊
-            var viewInfos = new List<(ElementId ViewId, View View, double WidthMm, double HeightMm)>();
+            var packItems = new List<PackItem>();
 
             foreach (var viewId in viewIds)
             {
@@ -240,97 +235,154 @@ namespace RevitMCP.Core
                 double viewWidth = ((cropBox.Max.X - cropBox.Min.X) * 304.8) / view.Scale;
                 double viewHeight = ((cropBox.Max.Y - cropBox.Min.Y) * 304.8) / view.Scale;
 
-                // 防呆：單一視圖就超過邊界寬度
-                double slotWidth = viewWidth + DATUM_BUBBLE_WIDTH_MM * 2;
-                if (slotWidth > boundaryWidthMm)
+                // 佔用尺寸 (含氣泡與標題)
+                double occW = viewWidth + DATUM_BUBBLE_WIDTH_MM * 2;
+                double occH = viewHeight + DATUM_BUBBLE_HEIGHT_MM + VIEWPORT_TITLE_HEIGHT_MM;
+                // 膨脹尺寸 (含間距) — 裝箱用此尺寸，即可保證彼此與邊界間距
+                double packW = occW + H_MARGIN_MM;
+                double packH = occH + V_MARGIN_MM;
+
+                // 防呆：單一視圖(含補償)就超過邊界，無論如何放不下
+                if (packW > boundaryWidthMm || packH > boundaryHeightMm)
                 {
-                    errors.Add($"視圖 '{view.Name}' 的寬度 ({Math.Round(viewWidth)} mm) 超過排版邊界限制 ({Math.Round(boundaryWidthMm)} mm)，已跳過。");
+                    errors.Add($"視圖 '{view.Name}' 尺寸 ({Math.Round(viewWidth)}×{Math.Round(viewHeight)} mm，含補償) 超過排版邊界，已跳過。");
                     continue;
                 }
 
-                viewInfos.Add((viewId, view, viewWidth, viewHeight));
+                packItems.Add(new PackItem
+                {
+                    ViewId = viewId,
+                    View = view,
+                    ViewW = viewWidth,
+                    ViewH = viewHeight,
+                    PackW = packW,
+                    PackH = packH
+                });
             }
 
-            // ★ 新演算法：以行為單位預算（Row Pre-calculation）
-            // 步驟：累加接下來視圖的 X 寬度，塞滿一行後換行
-            // 行高取該行內所有視圖中的最大高度
-            var rows = new List<List<(ElementId ViewId, View View, double WidthMm, double HeightMm)>>();
-            var currentRow = new List<(ElementId ViewId, View View, double WidthMm, double HeightMm)>();
-            double currentRowWidthSum = 0;
+            // ================================================
+            // 第二階段：外層貪婪(號段連續) + 內層 MaxRects 裝箱 (domain §3.3)
+            //   packItems 已依剖面編號排序 → 依序消費即保證同紙號段連續
+            // ================================================
+            var sheetSets = new List<List<PackItem>>();
+            var sheetPlacements = new List<List<(PackItem item, double x, double y)>>();
 
-            foreach (var info in viewInfos)
+            int idx = 0;
+            while (idx < packItems.Count)
             {
-                // 視圖在行內佔用的格位寬度（含左右氣泡補償）
-                double slotWidth = info.WidthMm + DATUM_BUBBLE_WIDTH_MM * 2 + H_MARGIN_MM;
+                var current = new List<PackItem>();
+                List<(PackItem, double, double)> currentPlacement = null;
 
-                // 若加入後超過邊界，先把目前行存起來，開新行
-                if (currentRow.Count > 0 && currentRowWidthSum + slotWidth > boundaryWidthMm)
+                int k = idx;
+                while (k < packItems.Count)
                 {
-                    rows.Add(currentRow);
-                    currentRow = new List<(ElementId, View, double, double)>();
-                    currentRowWidthSum = 0;
+                    var trial = new List<PackItem>(current) { packItems[k] };
+                    var res = TryPackMaxRects(trial, boundaryWidthMm, boundaryHeightMm);
+                    if (res != null)
+                    {
+                        // 可行 → 保留，繼續拿下一個編號
+                        current = trial;
+                        currentPlacement = res;
+                        k++;
+                    }
+                    else
+                    {
+                        // 不可行 → 收掉這張紙 (方案 A：嚴格號段連續，允許提早結束)
+                        break;
+                    }
                 }
 
-                currentRow.Add(info);
-                currentRowWidthSum += slotWidth;
-            }
-            // 把最後一行存入
-            if (currentRow.Count > 0)
-                rows.Add(currentRow);
-
-            // ================================================
-            // 第二階段：依行順序分配圖紙並計算放置座標
-            // ================================================
-            double layoutCurrentY = maxYMm;
-
-            foreach (var row in rows)
-            {
-                // 此行的最大視圖高度 = 行高基準
-                double rowMaxViewHeight = row.Max(r => r.HeightMm);
-                // 此行佔用的總垂直空間 (視圖本體 + 上方氣泡 + 下方標題 + 行距)
-                double rowTotalHeight = rowMaxViewHeight + DATUM_BUBBLE_HEIGHT_MM + VIEWPORT_TITLE_HEIGHT_MM + V_MARGIN_MM;
-
-                // 防呆：此行高度超過整個排版邊界（不可能放入任何一頁）
-                if (rowTotalHeight > boundaryHeightMm)
+                if (current.Count == 0)
                 {
-                    foreach (var item in row)
-                        errors.Add($"視圖 '{item.View.Name}' 所在行的高度 ({Math.Round(rowMaxViewHeight)} mm) 超過排版邊界，已跳過。");
+                    // 單一視圖連空白紙都放不下 (理論上已被上面尺寸檢查攔下，此為保險)
+                    errors.Add($"視圖 '{packItems[idx].View.Name}' 無法放入排版邊界，已跳過。");
+                    idx++;
                     continue;
                 }
 
-                // 若當前 Y 不夠放此行，換頁（建立新圖紙）
-                if (layoutCurrentY - rowTotalHeight < minYMm)
+                sheetSets.Add(current);
+                sheetPlacements.Add(currentPlacement);
+                idx += current.Count;
+            }
+
+            // ================================================
+            // 第三階段：末尾平衡 (domain §3.5)
+            //   最後一張填充率 < 50% → 重分末尾兩張，使兩張填充率盡量平均
+            //   (級聯重分為後續增強，目前實作兩張版)
+            // ================================================
+            double boundaryArea = boundaryWidthMm * boundaryHeightMm;
+            System.Func<List<PackItem>, double> fill =
+                s => (boundaryArea <= 0) ? 0 : s.Sum(p => p.PackW * p.PackH) / boundaryArea;
+            const double FILL_THRESHOLD = 0.5;
+
+            if (sheetSets.Count >= 2 && fill(sheetSets[sheetSets.Count - 1]) < FILL_THRESHOLD)
+            {
+                int a = sheetSets.Count - 2;
+                int b = sheetSets.Count - 1;
+
+                // 合併末尾兩張的連續號段 (外層依序消費 → combined 仍為連續)
+                var combined = new List<PackItem>(sheetSets[a]);
+                combined.AddRange(sheetSets[b]);
+
+                double currentMin = Math.Min(fill(sheetSets[a]), fill(sheetSets[b]));
+                double bestMinFill = currentMin;
+                List<PackItem> bestFirst = null, bestSecond = null;
+                List<(PackItem, double, double)> bestFirstPl = null, bestSecondPl = null;
+
+                // 在連續號段中尋找切點，兩張皆可行且 min(填充率) 最大
+                for (int p = 1; p < combined.Count; p++)
                 {
-                    sheetIndex++;
-                    sheetLayouts.Add(new List<ViewportPlacement>());
-                    layoutCurrentY = maxYMm;
+                    var first = combined.GetRange(0, p);
+                    var second = combined.GetRange(p, combined.Count - p);
+
+                    var pf = TryPackMaxRects(first, boundaryWidthMm, boundaryHeightMm);
+                    if (pf == null) continue;
+                    var ps = TryPackMaxRects(second, boundaryWidthMm, boundaryHeightMm);
+                    if (ps == null) continue;
+
+                    double mf = Math.Min(fill(first), fill(second));
+                    if (mf > bestMinFill + 1e-6)
+                    {
+                        bestMinFill = mf;
+                        bestFirst = first; bestSecond = second;
+                        bestFirstPl = pf; bestSecondPl = ps;
+                    }
                 }
 
-                // 由左至右依序放置此行的視圖
-                double layoutCurrentX = minXMm;
-                foreach (var item in row)
+                if (bestFirst != null)
                 {
-                    // 視埠放置中心點：
-                    //   X = 目前 X 起點 + 左側氣泡補償 + 視圖寬/2
-                    //   Y = 目前行頂部 - 上方氣泡高度 - 視圖高/2
-                    double centerX = layoutCurrentX + DATUM_BUBBLE_WIDTH_MM + item.WidthMm / 2.0;
-                    double centerY = layoutCurrentY - DATUM_BUBBLE_HEIGHT_MM - item.HeightMm / 2.0;
+                    sheetSets[a] = bestFirst; sheetSets[b] = bestSecond;
+                    sheetPlacements[a] = bestFirstPl; sheetPlacements[b] = bestSecondPl;
+                }
+            }
 
-                    sheetLayouts[sheetIndex].Add(new ViewportPlacement
+            // ================================================
+            // 第四階段：把裝箱結果 (膨脹矩形左上角) 換算為 Revit 視埠中心點
+            // ================================================
+            var sheetLayouts = new List<List<ViewportPlacement>>();
+            for (int s = 0; s < sheetSets.Count; s++)
+            {
+                var page = new List<ViewportPlacement>();
+                foreach (var (item, xTL, yTL) in sheetPlacements[s])
+                {
+                    // 裝箱局部座標 (0,0)=邊界左上，x 向右、y 向下
+                    double absLeftMm = minXMm + xTL;
+                    double absTopMm = maxYMm - yTL;
+
+                    // 由膨脹矩形左上角回推實際視圖中心 (domain §3.3.2)
+                    double centerXMm = absLeftMm + H_MARGIN_MM / 2.0 + DATUM_BUBBLE_WIDTH_MM + item.ViewW / 2.0;
+                    double centerYMm = absTopMm - (V_MARGIN_MM / 2.0 + DATUM_BUBBLE_HEIGHT_MM + item.ViewH / 2.0);
+
+                    page.Add(new ViewportPlacement
                     {
                         ViewId = item.ViewId,
                         ViewName = item.View.Name,
-                        Center = new XYZ(centerX / 304.8, centerY / 304.8, 0),
-                        WidthMm = Math.Round(item.WidthMm, 1),
-                        HeightMm = Math.Round(item.HeightMm, 1)
+                        Center = new XYZ(centerXMm / 304.8, centerYMm / 304.8, 0),
+                        WidthMm = Math.Round(item.ViewW, 1),
+                        HeightMm = Math.Round(item.ViewH, 1)
                     });
-
-                    // 移動到下一個視圖的 X 起點
-                    layoutCurrentX += item.WidthMm + DATUM_BUBBLE_WIDTH_MM * 2 + H_MARGIN_MM;
                 }
-
-                // 此行放置完成，Y 往下移動一行高度
-                layoutCurrentY -= rowTotalHeight;
+                sheetLayouts.Add(page);
             }
 
             var createdSheets = new List<string>();
@@ -415,6 +467,134 @@ namespace RevitMCP.Core
                 PlacedViewports = placedViewports,
                 Errors = errors
             };
+        }
+
+        /// <summary>
+        /// 輔助結構：待裝箱視圖 (含本體尺寸與膨脹後尺寸)
+        /// </summary>
+        private class PackItem
+        {
+            public ElementId ViewId { get; set; }
+            public View View { get; set; }
+            public double ViewW { get; set; }   // 視圖本體寬 (mm)
+            public double ViewH { get; set; }   // 視圖本體高 (mm)
+            public double PackW { get; set; }   // 膨脹矩形寬 (含氣泡+標題+間距，mm)
+            public double PackH { get; set; }   // 膨脹矩形高 (mm)
+        }
+
+        /// <summary>
+        /// 內層二維裝箱：MaxRects (Best Short Side Fit)。
+        /// 在 W×H 邊界內對 items 的膨脹矩形求無重疊放置。
+        /// 尺寸由大到小 (FFD) 排序放置；全部放入回傳各矩形左上角座標，任一放不下回傳 null。
+        /// 座標系：(0,0)=左上，x 向右、y 向下。
+        /// </summary>
+        private List<(PackItem item, double x, double y)> TryPackMaxRects(List<PackItem> items, double W, double H)
+        {
+            const double EPS = 1e-6;
+
+            // 剩餘空矩形集：每個 = {x, y, w, h}
+            var free = new List<double[]> { new double[] { 0, 0, W, H } };
+            var result = new List<(PackItem, double, double)>();
+
+            // FFD：高度由大到小，其次寬度
+            var ordered = items.OrderByDescending(i => i.PackH).ThenByDescending(i => i.PackW).ToList();
+
+            foreach (var it in ordered)
+            {
+                // 以 BSSF 挑選最佳空矩形
+                int bestIdx = -1;
+                double bestShort = double.MaxValue, bestLong = double.MaxValue;
+                for (int r = 0; r < free.Count; r++)
+                {
+                    double fw = free[r][2], fh = free[r][3];
+                    if (it.PackW <= fw + EPS && it.PackH <= fh + EPS)
+                    {
+                        double leftH = fw - it.PackW;
+                        double leftV = fh - it.PackH;
+                        double shortS = Math.Min(leftH, leftV);
+                        double longS = Math.Max(leftH, leftV);
+                        if (shortS < bestShort - EPS ||
+                            (Math.Abs(shortS - bestShort) <= EPS && longS < bestLong - EPS))
+                        {
+                            bestShort = shortS; bestLong = longS; bestIdx = r;
+                        }
+                    }
+                }
+                if (bestIdx < 0) return null; // 放不下 → 不可行
+
+                double px = free[bestIdx][0], py = free[bestIdx][1];
+                var placed = new double[] { px, py, it.PackW, it.PackH };
+                result.Add((it, px, py));
+
+                // 分割所有與 placed 重疊的空矩形 (MaxRects splitting)
+                var newFree = new List<double[]>();
+                foreach (var fr in free)
+                {
+                    if (Overlaps(fr, placed, EPS))
+                    {
+                        double fx = fr[0], fy = fr[1], fW = fr[2], fH = fr[3];
+                        // 上方殘塊
+                        if (placed[1] > fy + EPS)
+                            newFree.Add(new double[] { fx, fy, fW, placed[1] - fy });
+                        // 下方殘塊
+                        if (placed[1] + placed[3] < fy + fH - EPS)
+                            newFree.Add(new double[] { fx, placed[1] + placed[3], fW, (fy + fH) - (placed[1] + placed[3]) });
+                        // 左方殘塊
+                        if (placed[0] > fx + EPS)
+                            newFree.Add(new double[] { fx, fy, placed[0] - fx, fH });
+                        // 右方殘塊
+                        if (placed[0] + placed[2] < fx + fW - EPS)
+                            newFree.Add(new double[] { placed[0] + placed[2], fy, (fx + fW) - (placed[0] + placed[2]), fH });
+                    }
+                    else
+                    {
+                        newFree.Add(fr);
+                    }
+                }
+                free = PruneContained(newFree, EPS);
+            }
+
+            return result;
+        }
+
+        /// <summary>兩矩形是否重疊 (each = {x,y,w,h})</summary>
+        private bool Overlaps(double[] a, double[] b, double eps)
+        {
+            return a[0] < b[0] + b[2] - eps && a[0] + a[2] > b[0] + eps &&
+                   a[1] < b[1] + b[3] - eps && a[1] + a[3] > b[1] + eps;
+        }
+
+        /// <summary>outer 是否完整包住 inner</summary>
+        private bool Contains(double[] outer, double[] inner, double eps)
+        {
+            return outer[0] <= inner[0] + eps && outer[1] <= inner[1] + eps &&
+                   outer[0] + outer[2] >= inner[0] + inner[2] - eps &&
+                   outer[1] + outer[3] >= inner[1] + inner[3] - eps;
+        }
+
+        /// <summary>移除被其他空矩形完整包含的冗餘矩形</summary>
+        private List<double[]> PruneContained(List<double[]> rects, double eps)
+        {
+            var keep = new List<double[]>();
+            for (int i = 0; i < rects.Count; i++)
+            {
+                // 略過退化 (近零面積) 矩形
+                if (rects[i][2] <= eps || rects[i][3] <= eps) continue;
+
+                bool contained = false;
+                for (int j = 0; j < rects.Count; j++)
+                {
+                    if (i == j) continue;
+                    if (Contains(rects[j], rects[i], eps))
+                    {
+                        // 兩者互相包含 (相同矩形) 時只留索引較小者
+                        bool reverse = Contains(rects[i], rects[j], eps);
+                        if (!reverse || j < i) { contained = true; break; }
+                    }
+                }
+                if (!contained) keep.Add(rects[i]);
+            }
+            return keep;
         }
 
         /// <summary>

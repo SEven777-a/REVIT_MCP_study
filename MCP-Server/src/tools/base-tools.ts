@@ -242,5 +242,29 @@ export const baseTools: Tool[] = [
             },
             required: ["viewIds"]
         }
+    },
+    {
+        name: "set_layout_boundary",
+        description: "設定自動排版的可用範圍：讀取『目前圖紙 (Sheet) 視圖上被選取的細部線 (Detail Lines)』所圍出的矩形範圍並快取，作為後續 auto_layout_sheets 的裝箱邊界。使用前提：使用者需先切換到圖紙視圖、用細部線畫出範圍並選取。圖框 (Titleblock) 會自動沿用此圖紙。",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            required: []
+        }
+    },
+    {
+        name: "auto_layout_sheets",
+        description: "自動排版出圖：在 set_layout_boundary 設定的範圍內，將指定剖面/視圖以二維裝箱 (MaxRects) 塞入圖紙並自動放置視埠、換頁建立新圖紙。規則：跨圖紙依剖面編號『號段連續』(第一張 1–N、第二張 N+1–M…不跳號)，同一張圖紙內部放寬排列以最大化空間利用率；最後一張填充率過低時自動做末尾平衡。需先呼叫 set_layout_boundary。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                viewIds: {
+                    type: "array",
+                    items: { type: "number" },
+                    description: "要排版放置的剖面/視圖 Element ID 列表 (會依名稱末尾的剖面編號自動排序)"
+                }
+            },
+            required: ["viewIds"]
+        }
     }
 ];
