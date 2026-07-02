@@ -2,8 +2,8 @@
 name: view-link-cleanup-workflow
 description: "視圖連結雜訊清理工作流程：關閉當前視圖中所有連結模型（如結構、機電）的基準元件（樓層線、網格線、參考平面），以維持圖面整潔。當使用者提到清理視圖、隱藏連結、關閉連結基準、連結模型可見性時觸發。"
 metadata:
-  version: "1.0"
-  updated: "2026-05-15"
+  version: "1.1"
+  updated: "2026-07-02"
   created: "2026-05-15"
   contributors:
     - "AI Assistant"
@@ -15,13 +15,37 @@ metadata:
 
 # 視圖連結雜訊清理工作流程 (View Link Cleanup)
 
-> [!WARNING]
-> **本工作流程已暫停開發（已歸檔）**
-> 
-> **不繼續開發的原因**：
-> 1. **複雜度與效益比考量**：在 Revit API 中，控制連結模型（`RevitLinkInstance`）的特定品類可見性（V/G overrides for links）邏輯極為繁瑣，且實務上容易與專案內建的「視圖樣板（View Template）」產生高度衝突。
-> 2. **優先級調整**：目前開發重點已轉移至更具直接效益的**剖面自動編排與命名**（[section-auto-numbering.md](file:///c:/Users/sn698/Desktop/REVIT_MCP_study/domain/section-auto-numbering.md)），以優先解決視圖管理的排版需求。
-> 3. 此工作流程與相關 API 規範暫作存檔參考，未來若有需要再行重啟。
+> [!NOTE]
+> **本工作流程已於 2026-07-02 重啟討論（設計已定，尚未動工）**
+>
+> 當初暫停的原因是「控制連結特定品類可見性的 API 繁瑣、且易與視圖樣板衝突」+ 優先級被排版搶走。重啟後釐清需求並定案新方向，見下方「重啟後設計」。**下次續作從『待辦測試 Spike 1』開始。**
+
+---
+
+## 🔁 重啟後設計（2026-07-02）
+
+### 真實需求（使用者澄清）
+批次把「所有連結模型的基準品類」（`OST_Grids` / `OST_Levels` / `OST_ReferencePlanes`）設為隱藏。兩個情境本質同一操作，差在對象：
+1. **樣板成立前**：先清當前視圖（手動關 N 個 link 很煩）→ target = 視圖。
+2. **樣板成立後又新增 link**：樣板不會自動關新 link 的基準 → target = 視圖樣板本身，**重跑一次全套即可**（不用去找哪個是新 link，全 link 無腦重套）。
+
+### 設計決策
+- **不做兩個清理工具**：清理能力做「一個工具」；情境 2 做「一條 skill」去編排它（符合專案 Domain/Skill 原則）。
+- **視圖樣板本身是 View 物件**。若 API 允許「就地對樣板套 link override 並自動傳遞到所有套用視圖」，則使用者原本設想的「拆樣板→清理→刪舊建同名→重套回」dance 全部省掉。**優先就地編輯**。
+- 就地編輯不只簡單，還避免「從視圖重建樣板」的保真度風險（新樣板 include/exclude 勾選會 drift、可能控制範圍變多）。
+
+### 關鍵未解風險（決定成敗，動工前必驗）
+「在 host 視圖裡隱藏某個 link 的特定品類」的確切 Revit API 尚未驗證（`RevitLinkGraphicsSettings` / `LinkVisibilityType=Custom` / `View.SetLinkOverrides`）。這正是當初被判「繁瑣」的核心。
+
+### 待辦測試（下次續作從這裡開始）
+- **Spike 1**：一般視圖把「1 個 link 的網格」關掉 → API 能成功嗎？
+- **Spike 2**：對「視圖樣板」這個 View 做同樣事 → 套用該樣板的視圖會不會跟著變？（決定走就地 or dance）
+- Spike 需新增 C# 命令（現有唯讀工具做不到），要 build + 部署。
+
+### 執行環境決策
+- view-cleanup 決定「一路做完」→ 值得投資熱重載 `upstream/feature/core-reload-optin`（探索型 API、迭代多、模型重：Z:\ 網路碟 + 8 個 link）。
+- 使用者電腦**尚未設定過 optin**；計畫：基於 core-reload-optin 建本機分支 → build 三專案 → 部署 → 熱重載開發 spike/正式版 → 完成後把命令搬回本分支（單一 csproj，namespace 同為 `RevitMCP.Core`）提 PR。
+- 首次設定 optin 需關 Revit 重載重模型；使用者「之後關掉 Revit 時再用熱重載」。
 
 ---
 
